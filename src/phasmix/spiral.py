@@ -81,49 +81,31 @@ def generate_multi_bin_spirals_bt21(
     time_units = time_myr / 977.79
     delta_vz = 15.0  # km/s kick (Sagittarius-like perturbation effect)
 
+    needed = n_samples
+    bin_samples_list = []
+    r_disk = 3.0  # From DF parameters
+    # Estimate fraction of stars in this bin to optimize batch size
+    fractions = [
+        (1 + r_min / r_disk) * np.exp(-r_min / r_disk)
+        - (1 + r_max / r_disk) * np.exp(-r_max / r_disk)
+        for r_min, r_max in r_bins
+    ]
+    batch_size = int(needed / max(max(fractions), 1e-4) * 1.1) + 1000
+    batch_size = min(batch_size, 5_000_000)
+    samples_xv, _ = gm.sample(batch_size)
+    initial_rxy = np.hypot(samples_xv[:, 0], samples_xv[:, 1])
+
     n_bins = len(r_bins)
-    fig, axes = plt.subplots(n_bins, 3, figsize=(18, 5 * n_bins))
+    fig, axes = plt.subplots(n_bins, 2, figsize=(18, 5 * n_bins))
 
     for i, (r_min, r_max) in enumerate(tqdm(r_bins, desc="Radial Bins")):
         # Sample n_samples stars specifically for this radial bin
-        needed = n_samples
-        bin_samples_list = []
-        r_disk = 3.0  # From DF parameters
-        # Estimate fraction of stars in this bin to optimize batch size
-        fraction = (1 + r_min / r_disk) * np.exp(-r_min / r_disk) - (
-            1 + r_max / r_disk
-        ) * np.exp(-r_max / r_disk)
-
-        while needed > 0:
-            # Sample a batch based on estimated fraction
-            batch_size = int(needed / max(fraction, 1e-4) * 1.1) + 1000
-            batch_size = min(batch_size, 5_000_000)
-
-            samples_xv, _ = gm.sample(batch_size)
-            R = np.sqrt(samples_xv[:, 0] ** 2 + samples_xv[:, 1] ** 2)
-            mask = (R >= r_min) & (R < r_max)
-            found = samples_xv[mask]
-
-            if len(found) > 0:
-                take = min(len(found), needed)
-                bin_samples_list.append(found[:take])
-                needed -= take
-
-        bin_samples = np.vstack(bin_samples_list)
+        mask = (initial_rxy >= r_min) & (initial_rxy < r_max)
 
         # Apply perturbation
+        bin_samples = samples_xv[mask]
         bin_samples_perturbed = bin_samples.copy()
         bin_samples_perturbed[:, 5] += delta_vz
-
-        # Method 1: AA Evolution
-        res = af(bin_samples_perturbed, angles=True, frequencies=True)
-        actions = res[0]
-        angles = res[1]
-        frequencies = res[2]
-
-        angles_evolved = (angles + frequencies * time_units) % (2 * np.pi)
-        aa_evolved = np.column_stack([actions, angles_evolved])
-        xv_aa = am(aa_evolved)
 
         # Method 2: Orbit Integration
         orbits = agama.orbit(
@@ -138,13 +120,12 @@ def generate_multi_bin_spirals_bt21(
         # Plotting
         titles = [
             f"Equilibrium R:[{r_min},{r_max}]",
-            "AA Evolution",
             "Orbit Integration",
         ]
-        data_z = [bin_samples[:, 2], xv_aa[:, 2], xv_orbit[:, 2]]
-        data_vz = [bin_samples[:, 5], xv_aa[:, 5], xv_orbit[:, 5]]
+        data_z = [bin_samples[:, 2], xv_orbit[:, 2]]
+        data_vz = [bin_samples[:, 5], xv_orbit[:, 5]]
 
-        for j in range(3):
+        for j in range(2):
             ax = axes[i, j] if n_bins > 1 else axes[j]
             density, _, _ = np.histogram2d(
                 data_vz[j], data_z[j], bins=(vz_bins, z_bins), density=True
