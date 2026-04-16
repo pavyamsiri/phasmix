@@ -24,8 +24,15 @@ def _get_edges_and_centers_size(
 def generate_multi_bin_spirals_bt21(
     output_file="phase_spiral_bt21.png",
     time_myr=300.0,
-    n_samples=200000,
-    r_bins=[(7.0, 8.0), (8.0, 9.0)],
+    n_samples=200_000,
+    r_bins=[
+        (3.0, 4.0),
+        (4.0, 5.0),
+        (5.0, 6.0),
+        (6.0, 7.0),
+        (7.0, 8.0),
+        (8.0, 9.0),
+    ],
 ):
     """
     Generate phase spirals for multiple radial bins using the model parameters
@@ -82,7 +89,6 @@ def generate_multi_bin_spirals_bt21(
     delta_vz = 15.0  # km/s kick (Sagittarius-like perturbation effect)
 
     needed = n_samples
-    bin_samples_list = []
     r_disk = 3.0  # From DF parameters
     # Estimate fraction of stars in this bin to optimize batch size
     fractions = [
@@ -91,29 +97,32 @@ def generate_multi_bin_spirals_bt21(
         for r_min, r_max in r_bins
     ]
     batch_size = int(needed / max(max(fractions), 1e-4) * 1.1) + 1000
-    batch_size = min(batch_size, 5_000_000)
     samples_xv, _ = gm.sample(batch_size)
     initial_rxy = np.hypot(samples_xv[:, 0], samples_xv[:, 1])
 
     n_bins = len(r_bins)
-    fig, axes = plt.subplots(n_bins, 2, figsize=(18, 5 * n_bins))
+    fig, axes = plt.subplots(n_bins, 3, figsize=(18, 5 * n_bins))
 
-    for i, (r_min, r_max) in enumerate(tqdm(r_bins, desc="Radial Bins")):
+    for i, (r_min, r_max) in enumerate(r_bins):
         # Sample n_samples stars specifically for this radial bin
         mask = (initial_rxy >= r_min) & (initial_rxy < r_max)
 
         # Apply perturbation
         bin_samples = samples_xv[mask]
+        if bin_samples.shape[0] > needed:
+            indices = np.random.choice(range(bin_samples.shape[0]), size=needed)
+            bin_samples = bin_samples[indices, :]
         bin_samples_perturbed = bin_samples.copy()
         bin_samples_perturbed[:, 5] += delta_vz
 
         # Method 2: Orbit Integration
+        print(f"Integrating {bin_samples_perturbed.shape[0]} stars")
         orbits = agama.orbit(
             potential=pot,
             ic=bin_samples_perturbed,
             time=time_units,
             dtype=object,
-            verbose=False,
+            verbose=True,
         )
         xv_orbit = np.array([orb(time_units) for orb in orbits])
 
@@ -146,6 +155,8 @@ def generate_multi_bin_spirals_bt21(
             ax.set_ylabel("Vz [km/s]")
             ax.set_title(f"{titles[j]}: {len(data_vz[j])} stars")
             fig.colorbar(img, ax=ax)
+        dist_ax = axes[i, 2] if n_bins > 1 else axes[2]
+        dist_ax.hexbin(xv_orbit[:, 0], xv_orbit[:, 1])
 
     plt.suptitle(f"Phase Spiral (BT21 Potential) at t={time_myr} Myr", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.97])
