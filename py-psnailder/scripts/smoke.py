@@ -11,6 +11,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from phasmix.component import AlinderComponent, GaussianComponent
 from phasmix.mock import MockModel
+from rich.console import Console
+from rich.logging import RichHandler
 
 from psnailder import bootstrap_uncertainty, fit
 from psnailder._background_utils import generate_initial_background
@@ -18,12 +20,39 @@ from psnailder._likelihood_utils import ln_likelihood
 from psnailder.fit import PSpiralFitter
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Final
 
     from optype import numpy as onp
 
 
+FORMAT: Final[str] = "%(message)s"
 log: Final[logging.Logger] = logging.getLogger(__name__)
+
+
+def setup_logging() -> Iterable[logging.Handler]:
+    """Set up logging.
+
+    Returns
+    -------
+    handlers : Iterable[logging.Handler]
+        The logging handlers.
+
+    """
+    console = Console()
+    console_handler = RichHandler(console=console, show_time=False, markup=True)
+    handlers: list[logging.Handler] = [console_handler]
+    logging.basicConfig(
+        level="NOTSET",
+        format=FORMAT,
+        datefmt="[%X]",
+        handlers=handlers,
+        encoding="utf-8",
+    )
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+
+    return handlers
 
 
 @dataclass
@@ -65,7 +94,7 @@ def _generate_mock() -> MockData:
         (background_comp,),
     )
 
-    log.info("%d-arm model", len(mock_model.signal))
+    log.info("%d-arm model", len(mock_model._signal))
 
     num_x_bins = 100
     num_y_bins = 100
@@ -114,7 +143,7 @@ def _main() -> None:
     y_mesh = mock_data.y_mesh
     mask = mock_data.mask
 
-    log.info("\n--- Rust Version ---")
+    log.info("--- Rust Version ---")
 
     fitter_rust = PSpiralFitter(backend="rust", max_iterations=10)
     start_time = time.perf_counter()
@@ -133,7 +162,7 @@ def _main() -> None:
     log.info("Rust final lnl: %.2f", res_rust.lnl)
     log.info("Rust pvalue: %f", res_rust.final_model.pvalue(density, mask))
 
-    log.info("\n--- Python Version ---")
+    log.info("--- Python Version ---")
     fitter_py = PSpiralFitter(backend="python", max_iterations=10)
     start_time = time.perf_counter()
     outcome_py = fitter_py.fit_spiral_with_background(
@@ -151,7 +180,7 @@ def _main() -> None:
     log.info("Python final lnl: %.2f", res_py.lnl)
     log.info("Python pvalue: %f", res_py.final_model.pvalue(density, mask))
 
-    log.info("\n--- Python Bootstrap Errors (fixed background, 200 local refits) ---")
+    log.info("--- Python Bootstrap Errors (fixed background, 200 local refits) ---")
     start_time = time.perf_counter()
     uncertainty = bootstrap_uncertainty(fitter_py, res_py, n_resamples=200, seed=2, workers=4)
     elapsed_bootstrap = time.perf_counter() - start_time
@@ -202,4 +231,5 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
+    _ = setup_logging()
     _main()
