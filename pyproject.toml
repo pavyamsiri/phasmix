@@ -4,4 +4,5 @@ members = ["py-psnailder"]
 [dependency-groups]
 dev = [
     "matplotlib>=3.10.9",
+    "pyqt6>=6.11.0",
 ]
