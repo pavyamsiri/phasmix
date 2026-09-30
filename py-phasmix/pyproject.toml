@@ -1,5 +1,5 @@
 [project]
-name = "psnailder"
+name = "phasmix"
 version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
@@ -56,13 +56,13 @@ ignore = [
 dev = [
     "matplotlib>=3.10.9",
     "maturin>=1.13.3",
-    "phasmix",
+    "phasmix-mock",
     "pytest>=9.0.2",
     "rich>=15.0.0",
 ]
 
 [tool.maturin]
-module-name = "psnailder._internal"
+module-name = "phasmix._internal"
 features = ["pyo3/extension-module"]
 # Keep uv's editable installs fast enough for fitting and benchmarking.
 editable-profile = "release"
@@ -76,4 +76,4 @@ cache-keys = [
 ]
 
 [tool.uv.sources]
-phasmix = { git = "https://github.com/pavyamsiri/phasmix.git" }
+phasmix-mock = { git = "https://github.com/pavyamsiri/phasmix-mock.git" }

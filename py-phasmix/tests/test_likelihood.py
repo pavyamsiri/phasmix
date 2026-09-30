@@ -6,7 +6,7 @@
 import numpy as np
 import pytest
 
-from psnailder._likelihood_utils import ln_likelihood
+from phasmix._likelihood_utils import ln_likelihood
 
 
 @pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf])

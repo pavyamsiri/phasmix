@@ -12,7 +12,7 @@ import numpy as np
 from optype import numpy as onp
 from scipy import ndimage, optimize, special
 
-from psnailder._likelihood_utils import ln_likelihood
+from phasmix._likelihood_utils import ln_likelihood
 
 from ._backends import (
     BackendEvent,

@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["py-psnailder"]
+members = ["py-phasmix"]
 
 [dependency-groups]
 dev = [

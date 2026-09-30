@@ -116,7 +116,7 @@ wheels = [
 ]
 
 [[package]]
-name = "psnailder"
+name = "phasmix"
 version = "0.1.8"
 source = { editable = "." }
 dependencies = [

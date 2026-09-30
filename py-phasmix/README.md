@@ -1,4 +1,4 @@
-# psnailder: Python fitting API
+# phasmix: Python fitting API
 
 Fit phase-spiral models to position/velocity samples or an existing count map.
 The examples below describe the Python fitter; the private Rust binding does
@@ -11,8 +11,8 @@ unchanged configuration. Normal fits do no bootstrap work. Given a successful
 `outcome` from any fitting method:
 
 ```python
-from psnailder import bootstrap_uncertainty
-from psnailder.fit import FitSuccess
+from phasmix import bootstrap_uncertainty
+from phasmix.fit import FitSuccess
 
 assert isinstance(outcome, FitSuccess)
 uncertainty = bootstrap_uncertainty(
@@ -33,7 +33,7 @@ To include sampling variability in the KDE and background refinement, supply
 the original paired stars and bin edges:
 
 ```python
-from psnailder import BootstrapSamples
+from phasmix import BootstrapSamples
 
 uncertainty = bootstrap_uncertainty(
     fitter,
@@ -83,8 +83,8 @@ The implementation roadmap is in
 ## Bounds and units
 
 ```python
-from psnailder.bounds import Fixed, Interval, ParameterBounds
-from psnailder.fit import PSpiralFitter
+from phasmix.bounds import Fixed, Interval, ParameterBounds
+from phasmix.fit import PSpiralFitter
 
 shared_bounds = ParameterBounds(
     alpha=(0.0, 0.8),
@@ -141,7 +141,7 @@ exact relative separation between the arms.
 Given paired one-dimensional sample arrays `z`, `vz`, and increasing bin edges:
 
 ```python
-from psnailder.fit import FitFailure
+from phasmix.fit import FitFailure
 
 outcome = fitter.fit_spiral(
     z, vz, z_bins, vz_bins,
@@ -219,7 +219,7 @@ array is not rescaled in place.
 ## Progress and iteration budgets
 
 ```python
-from psnailder.fit import FitProgress
+from phasmix.fit import FitProgress
 
 for event in fitter.fit_spiral_gen(
     z, vz, z_bins, vz_bins, rng=np.random.default_rng(42),

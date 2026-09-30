@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 from scipy.optimize import Bounds, OptimizeResult
 
-from psnailder._likelihood_utils import ln_likelihood
-from psnailder._python_backend import PythonFitBackend
-from psnailder._rust_backend import RustFitBackend
-from psnailder.fit import (
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix._python_backend import PythonFitBackend
+from phasmix._rust_backend import RustFitBackend
+from phasmix.fit import (
     FitFailure,
     FitFailureReason,
     FitProgress,
@@ -27,7 +27,7 @@ from psnailder.fit import (
     PSpiralFitter,
     create_sigmoid_mask,
 )
-from psnailder.model import PSpiralModel
+from phasmix.model import PSpiralModel
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,7 +45,7 @@ def test_warm_start_forwarded_to_differential_evolution(num_components: int) -> 
     rng = np.random.default_rng(42)
     optimizer_result = OptimizeResult(x=parameters.copy(), fun=0.0, success=True, nfev=10, nit=2, message="Converged")  # pyright: ignore[reportCallIssue]
 
-    with patch("psnailder.fit.optimize.differential_evolution", return_value=optimizer_result) as optimizer:
+    with patch("phasmix.fit.optimize.differential_evolution", return_value=optimizer_result) as optimizer:
         result = fitter.fit_spiral_with_background(
             data,
             data.copy(),
@@ -78,7 +78,7 @@ def test_rust_backend_can_be_selected() -> None:
 
 def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """The adapter constructs the native fitter with backend-neutral options."""
-    from psnailder import _internal  # noqa: PLC0415 -- optional extension is only needed by this test.
+    from phasmix import _internal  # noqa: PLC0415 -- optional extension is only needed by this test.
 
     calls: list[dict[str, object]] = []
 
@@ -118,7 +118,7 @@ def test_warm_start_rejected_with_automatic_component_selection(num_components: 
     fitter = PSpiralFitter(max_iterations=1)
 
     with (
-        patch("psnailder.fit.optimize.differential_evolution") as optimizer,
+        patch("phasmix.fit.optimize.differential_evolution") as optimizer,
         pytest.raises(ValueError, match=r"warm start.*component"),
     ):
         _ = fitter.fit_spiral_with_background(
@@ -345,7 +345,7 @@ def test_unusable_samples_return_failure(kind: str) -> None:
     samples = {"empty": [], "single": [0.0], "outside": [10.0, 11.0], "singular": [0.0, 0.0]}[kind]
     z = np.array(samples)
     bins = np.array([-1.0, 0.0, 1.0])
-    with patch("psnailder.fit.optimize.differential_evolution") as optimizer:
+    with patch("phasmix.fit.optimize.differential_evolution") as optimizer:
         outcome = PSpiralFitter().fit_spiral(z, z, bins, bins)
     assert isinstance(outcome, FitFailure)
     assert outcome.diagnostics.nfev == 0
@@ -358,7 +358,7 @@ def test_invalid_input_maps(which: int, kind: str) -> None:
     """Test that when samples of `z` and `vz` are invalid, then the fitter returns before optimizer is even called."""
     arrays = [np.ones((2, 2)) for _ in range(4)]
     arrays[which] = np.ones((1, 2)) if kind == "shape" else np.full((2, 2), np.nan)
-    with patch("psnailder.fit.optimize.differential_evolution") as optimizer, pytest.raises(ValueError):  # noqa: PT011 -- Covers distinct shape and finiteness errors.
+    with patch("phasmix.fit.optimize.differential_evolution") as optimizer, pytest.raises(ValueError):  # noqa: PT011 -- Covers distinct shape and finiteness errors.
         _ = PSpiralFitter().fit_spiral_with_background(*arrays)
     optimizer.assert_not_called()
 
@@ -367,7 +367,7 @@ def test_invalid_input_maps(which: int, kind: str) -> None:
 @pytest.mark.parametrize("value", [True, 1.5, np.nan, np.inf])
 def test_invalid_integer_configuration(field: str, value: float | bool) -> None:
     grid = np.ones((2, 2))
-    with patch("psnailder.fit.generate_initial_background") as kde:
+    with patch("phasmix.fit.generate_initial_background") as kde:
         if field == "max_iterations":
             with pytest.raises(ValueError, match=field):
                 _ = PSpiralFitter(max_iterations=value)  # pyright: ignore[reportArgumentType]
@@ -383,7 +383,7 @@ def test_invalid_integer_configuration(field: str, value: float | bool) -> None:
 @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
 def test_nonfinite_samples_rejected_before_kde(value: float) -> None:
     bins = np.arange(3.0)
-    with patch("psnailder.fit.generate_initial_background") as kde, pytest.raises(ValueError, match="finite"):
+    with patch("phasmix.fit.generate_initial_background") as kde, pytest.raises(ValueError, match="finite"):
         _ = PSpiralFitter().fit_spiral(np.array([0.0, value]), np.zeros(2), bins, bins)
     kde.assert_not_called()
 
@@ -429,7 +429,7 @@ def test_optimizer_diagnostics_forwarded(converged: bool) -> None:
     grid = np.ones((2, 2))
     parameters = np.array([0.0, 0.05, 0.002, 0.0, 40.0, 0.09])
     result = OptimizeResult(x=parameters, fun=0.0, success=converged, message="Optimizer message", nfev=37, nit=4)  # pyright: ignore[reportCallIssue]
-    with patch("psnailder.fit.optimize.differential_evolution", return_value=result):
+    with patch("phasmix.fit.optimize.differential_evolution", return_value=result):
         outcome = PSpiralFitter().fit_spiral_with_background(
             grid,
             grid,
@@ -445,7 +445,7 @@ def test_optimizer_diagnostics_forwarded(converged: bool) -> None:
 
 def test_invalid_data_has_no_optimizer_work() -> None:
     grid = np.zeros((2, 2))
-    with patch("psnailder.fit.optimize.differential_evolution") as optimizer:
+    with patch("phasmix.fit.optimize.differential_evolution") as optimizer:
         outcome = PSpiralFitter().fit_spiral_with_background(grid, grid, grid, grid)
     optimizer.assert_not_called()
     assert isinstance(outcome, FitFailure)
@@ -678,7 +678,7 @@ def test_sample_wrapper_forwards_rng_and_outcome() -> None:
         OptimizationDiagnostics(message="Not run", success=False, nfev=0, nit=0),
     )
     with (
-        patch("psnailder.fit.generate_initial_background", return_value=np.ones((2, 2))),
+        patch("phasmix.fit.generate_initial_background", return_value=np.ones((2, 2))),
         patch.object(fitter, "fit_spiral_with_background_gen", return_value=iter([failure])) as fit,
     ):
         outcome = fitter.fit_spiral(samples, samples, bins, bins, rng=rng)
@@ -703,7 +703,7 @@ def test_sample_background_accounts_for_bin_area(uniform: bool) -> None:
     )
     fitter = PSpiralFitter()
     with (
-        patch("psnailder.fit.generate_initial_background", return_value=kde_density),
+        patch("phasmix.fit.generate_initial_background", return_value=kde_density),
         patch.object(fitter, "fit_spiral_with_background_gen", return_value=iter([failure])) as fit,
     ):
         assert fitter.fit_spiral(z, vz, z_edges, vz_edges) is failure
@@ -724,7 +724,7 @@ def test_sample_background_accounts_for_bin_area(uniform: bool) -> None:
 def test_invalid_bin_edges_rejected_before_kde(edges: list[float], axis: str) -> None:
     invalid = np.array(edges)
     valid = np.array([0.0, 1.0])
-    with patch("psnailder.fit.generate_initial_background") as kde, pytest.raises(ValueError, match="bin edges"):
+    with patch("phasmix.fit.generate_initial_background") as kde, pytest.raises(ValueError, match="bin edges"):
         _ = PSpiralFitter().fit_spiral(
             np.array([0.5]),
             np.array([0.5]),

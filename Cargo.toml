@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/psnailder_core",
-    "py-psnailder",
+    "py-phasmix",
     "crates/psnailder_tiktak",
     "crates/psnailder_fit",
     "crates/psnailder_mock",

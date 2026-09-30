@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from psnailder import component, fit, model
-from psnailder.uncertainty import BootstrapReplicate, BootstrapResult, BootstrapSamples, bootstrap_uncertainty
+from phasmix import component, fit, model
+from phasmix.uncertainty import BootstrapReplicate, BootstrapResult, BootstrapSamples, bootstrap_uncertainty
 
 if TYPE_CHECKING:
     from typing import Final

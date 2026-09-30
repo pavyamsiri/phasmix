@@ -8,9 +8,9 @@ from typing import Literal
 import numpy as np
 import pytest
 
-from psnailder._internal import PSpiralComponent as RustComponent
-from psnailder.component import PSpiralComponent
-from psnailder.model import PSpiralModel
+from phasmix._internal import PSpiralComponent as RustComponent
+from phasmix.component import PSpiralComponent
+from phasmix.model import PSpiralModel
 
 
 @pytest.mark.parametrize("b", [-0.05, 0.05])

@@ -9,15 +9,15 @@ import numpy as np
 from matplotlib import colors as mplcolors
 from matplotlib import pyplot as plt
 from matplotlib import widgets
-from phasmix.component import AlinderComponent, GaussianComponent
-from phasmix.mock import MockModel
+from phasmock.component import AlinderComponent, GaussianComponent
+from phasmock.mock import MockModel
 from rich.console import Console
 from rich.logging import RichHandler
 
-from psnailder import fit
-from psnailder._background_utils import generate_initial_background
-from psnailder._likelihood_utils import ln_likelihood
-from psnailder.fit import FitFailure, FitSuccess, PSpiralFitter
+from phasmix import fit
+from phasmix._background_utils import generate_initial_background
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.fit import FitFailure, FitSuccess, PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

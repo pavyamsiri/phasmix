@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from scipy import optimize  # noqa: F401 -- retained as a compatibility patch target for callers/tests.
 
-from psnailder._backends import FitBackend, FitRequest
-from psnailder._python_backend import PythonFitBackend
-from psnailder._rust_backend import RustFitBackend
+from phasmix._backends import FitBackend, FitRequest
+from phasmix._python_backend import PythonFitBackend
+from phasmix._rust_backend import RustFitBackend
 
 from ._backends import (
     BackendEvent,

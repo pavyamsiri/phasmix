@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from psnailder.fit import FitFailure, FitInput, FitSuccess, ParameterBounds, PSpiralFitter
+from phasmix.fit import FitFailure, FitInput, FitSuccess, ParameterBounds, PSpiralFitter
 
 
 @pytest.mark.parametrize("workers", [1, 2, None])
@@ -104,7 +104,7 @@ def test_native_batch_releases_gil_after_copying() -> None:
     import sys  # noqa: PLC0415
     from threading import Event, Timer  # noqa: PLC0415
 
-    from psnailder import _internal  # noqa: PLC0415
+    from phasmix import _internal  # noqa: PLC0415
 
     grid = np.ones(128 * 128)
     mesh = np.zeros_like(grid)

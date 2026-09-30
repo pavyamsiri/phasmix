@@ -11,14 +11,14 @@ import numpy as np
 import pytest
 from scipy import optimize
 
-from psnailder import BootstrapSamples, bootstrap_uncertainty
-from psnailder.bounds import ParameterBounds
-from psnailder.fit import FitSuccess, PSpiralFitter
-from psnailder.model import PSpiralModel
-from psnailder.uncertainty import _aligned  # pyright: ignore[reportPrivateUsage] -- test periodic component alignment.
+from phasmix import BootstrapSamples, bootstrap_uncertainty
+from phasmix.bounds import ParameterBounds
+from phasmix.fit import FitSuccess, PSpiralFitter
+from phasmix.model import PSpiralModel
+from phasmix.uncertainty import _aligned  # pyright: ignore[reportPrivateUsage] -- test periodic component alignment.
 
 if TYPE_CHECKING:
-    from psnailder.fit import PSpiralFitResult
+    from phasmix.fit import PSpiralFitResult
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def test_count_bootstrap_is_local_reproducible_and_nonmutating(fitted: tuple[PSp
     fitter, result = fitted
     original = result.final_model.parameters.copy()
     background = result.final_model.background.copy()
-    with patch("psnailder._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")):
+    with patch("phasmix._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")):
         serial = bootstrap_uncertainty(fitter, result, n_resamples=8, seed=12)
         parallel = bootstrap_uncertainty(fitter, result, n_resamples=10, seed=12, workers=2)
     assert serial.n_successful == 8
@@ -77,12 +77,12 @@ def test_sample_bootstrap_rebuilds_background_and_replays_refinement() -> None:
     fitter = PSpiralFitter(bounds=bounds, max_iterations=1)
     outcome = fitter.fit_spiral(z, vz, z_bins, vz_bins, num_components=1, winding=1)
     assert isinstance(outcome, FitSuccess)
-    from psnailder import fit  # noqa: PLC0415 -- wrap the real preprocessing implementation.
+    from phasmix import fit  # noqa: PLC0415 -- wrap the real preprocessing implementation.
 
     with (
-        patch("psnailder.fit.generate_initial_background", wraps=fit.generate_initial_background) as kde,
-        patch("psnailder._python_backend.optimize.minimize", side_effect=AssertionError("all parameters fixed")),
-        patch("psnailder._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")),
+        patch("phasmix.fit.generate_initial_background", wraps=fit.generate_initial_background) as kde,
+        patch("phasmix._python_backend.optimize.minimize", side_effect=AssertionError("all parameters fixed")),
+        patch("phasmix._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")),
     ):
         summary = bootstrap_uncertainty(
             fitter,
@@ -140,7 +140,7 @@ def test_weighted_counts_are_rejected(fitted: tuple[PSpiralFitter, PSpiralFitRes
 
 
 def test_full_period_bounds_are_centered_without_changing_restricted_bounds() -> None:
-    from psnailder.uncertainty import _local_bounds  # noqa: PLC0415  # pyright: ignore[reportPrivateUsage]
+    from phasmix.uncertainty import _local_bounds  # noqa: PLC0415  # pyright: ignore[reportPrivateUsage]
 
     centered = _local_bounds(ParameterBounds(), 3.1)
     assert centered.theta0 == ParameterBounds(theta0=(3.1 - np.pi, 3.1 + np.pi)).theta0
@@ -155,7 +155,7 @@ def test_singular_sample_draws_remain_failed_replicates() -> None:
     fitter = PSpiralFitter(bounds=ParameterBounds(alpha=0.2, b=0.05, c=0.002, theta0=0, scale_factor=40, rho=0.09))
     outcome = fitter.fit_spiral(z, vz, edges, edges, num_components=1, winding=1, improve_background=False)
     assert isinstance(outcome, FitSuccess)
-    with patch("psnailder.fit.generate_initial_background", side_effect=np.linalg.LinAlgError("singular draw")):
+    with patch("phasmix.fit.generate_initial_background", side_effect=np.linalg.LinAlgError("singular draw")):
         summary = bootstrap_uncertainty(
             fitter,
             outcome.result,
@@ -175,8 +175,8 @@ def test_sample_refinement_uses_local_optimizer_for_every_update() -> None:
     outcome = fitter.fit_spiral(z, vz, z_bins, vz_bins, num_components=1, winding=1, rng=rng)
     assert isinstance(outcome, FitSuccess)
     with (
-        patch("psnailder._python_backend.optimize.minimize", wraps=optimize.minimize) as local,
-        patch("psnailder._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")),
+        patch("phasmix._python_backend.optimize.minimize", wraps=optimize.minimize) as local,
+        patch("phasmix._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")),
     ):
         summary = bootstrap_uncertainty(
             fitter,
