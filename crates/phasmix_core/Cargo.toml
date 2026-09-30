@@ -1,12 +1,12 @@
 [package]
-name = "psnailder_core"
+name = "phasmix_core"
 version = "0.0.0"
 edition = "2024"
 
 [dependencies]
 itertools = { workspace = true }
 wide = { workspace = true }
-psnailder_math = { workspace = true }
+phasmix_math = { workspace = true }
 
 [dev-dependencies]
 assert_float_eq = { workspace = true }

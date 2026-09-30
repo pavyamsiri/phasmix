@@ -4,7 +4,7 @@ use alloc::collections::BinaryHeap;
 use argmin_testfunctions::rosenbrock;
 use basin::CostFunction;
 use core::{cmp, convert, fmt};
-use psnailder_core::usize_to_f64;
+use phasmix_core::usize_to_f64;
 use rayon::prelude::*;
 
 #[derive(Debug)]

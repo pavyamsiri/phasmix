@@ -1,5 +1,5 @@
 [package]
-name = "psnailder_fit"
+name = "phasmix_fit"
 version = "0.0.0"
 edition = "2024"
 
@@ -9,10 +9,10 @@ itertools = { workspace = true }
 ndarray = { workspace = true }
 rayon = { workspace = true }
 wide = { workspace = true }
-psnailder_core = { workspace = true }
-psnailder_math = { workspace = true }
-psnailder_mock = { workspace = true }
-psnailder_tiktak = { workspace = true }
+phasmix_core = { workspace = true }
+phasmix_math = { workspace = true }
+phasmix_mock = { workspace = true }
+phasmix_tiktak = { workspace = true }
 
 [lints]
 workspace = true

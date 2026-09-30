@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use psnailder_core::likelihood::ln_likelihood_naive;
-use psnailder_core::likelihood::ln_likelihood_wide;
+use phasmix_core::likelihood::ln_likelihood_naive;
+use phasmix_core::likelihood::ln_likelihood_wide;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
 use rand::rngs::SmallRng;

@@ -1,6 +1,6 @@
 use numpy::{PyArray1, PyReadonlyArray1};
-use psnailder_core::{PSpiralComponent as RustComponent, PSpiralModel as RustModel};
-use psnailder_fit::{PSpiralFitter as RustFitter, PSpiralFitterND};
+use phasmix_core::{PSpiralComponent as RustComponent, PSpiralModel as RustModel};
+use phasmix_fit::{PSpiralFitter as RustFitter, PSpiralFitterND};
 use pyo3::{exceptions::PyValueError, prelude::*};
 use rayon::prelude::*;
 use statrs::distribution::ContinuousCDF;
@@ -169,7 +169,7 @@ pub struct PSpiralFitResult {
 
 #[pyclass]
 pub struct PSpiralFitIterator {
-    inner: Option<psnailder_fit::PSpiralFitterIterative>,
+    inner: Option<phasmix_fit::PSpiralFitterIterative>,
     mask: Vec<f64>,
 }
 
@@ -192,8 +192,8 @@ impl PSpiralFitIterator {
             statrs::distribution::ChiSquared::new(dof).expect("`freedom` is guaranteed positive.");
         let data = res.data.to_vec();
         let initial_null =
-            psnailder_core::ln_likelihood(&data, &res.initial_background, &self.mask);
-        let final_null = psnailder_core::ln_likelihood(&data, &res.final_background, &self.mask);
+            phasmix_core::ln_likelihood(&data, &res.initial_background, &self.mask);
+        let final_null = phasmix_core::ln_likelihood(&data, &res.final_background, &self.mask);
         Ok(Some(PSpiralFitResult {
             initial_model: PSpiralModel(res.initial_model),
             final_model: PSpiralModel(res.final_model),
@@ -242,7 +242,7 @@ impl PSpiralFitter {
     fn validate_options(
         num_components: Option<usize>,
         winding: Option<i8>,
-    ) -> PyResult<Option<psnailder_core::Winding>> {
+    ) -> PyResult<Option<phasmix_core::Winding>> {
         if num_components.is_some_and(|count| count != 1 && count != 2) {
             return Err(PyValueError::new_err(
                 "num_components must be 1, 2, or None",
@@ -259,15 +259,15 @@ impl PSpiralFitter {
 
     fn convert_result(
         py: Python<'_>,
-        res: psnailder_fit::PSpiralFitResult,
+        res: phasmix_fit::PSpiralFitResult,
         mask: &[f64],
     ) -> PyResult<PSpiralFitResult> {
         let dof = (6 * res.final_model.components.len()) as f64;
         let dist =
             statrs::distribution::ChiSquared::new(dof).expect("`freedom` is guaranteed positive.");
         let lnl_initial_null =
-            psnailder_core::ln_likelihood(&res.data, &res.initial_background, mask);
-        let lnl_final_null = psnailder_core::ln_likelihood(&res.data, &res.final_background, mask);
+            phasmix_core::ln_likelihood(&res.data, &res.initial_background, mask);
+        let lnl_final_null = phasmix_core::ln_likelihood(&res.data, &res.final_background, mask);
         let lnl_initial = res.initial_lnl;
         let lnl_final = res.final_lnl;
         let lambda_initial = -2.0 * (lnl_initial_null - lnl_initial);
@@ -310,13 +310,13 @@ impl PSpiralFitter {
         // TikTak sampling remains an internal implementation detail until the
         // runtime parameter-layout path replaces the fixed 1-/2-component path.
         let num_samples = 4096usize;
-        let tiktak1 = psnailder_tiktak::TikTak::<6>::new(
+        let tiktak1 = phasmix_tiktak::TikTak::<6>::new(
             (num_samples as f64).log2() as u8,
             128.0f32.recip(),
             0.1,
             0.995,
         );
-        let tiktak2 = psnailder_tiktak::TikTak::<12>::new(
+        let tiktak2 = phasmix_tiktak::TikTak::<12>::new(
             (num_samples as f64).log2() as u8,
             128.0f32.recip(),
             0.1,
@@ -572,7 +572,7 @@ fn ln_likelihood(
     let prediction = prediction.as_slice()?;
     let mask = mask.as_slice()?;
 
-    Ok(psnailder_core::ln_likelihood(data, prediction, mask))
+    Ok(phasmix_core::ln_likelihood(data, prediction, mask))
 }
 
 #[pymodule]

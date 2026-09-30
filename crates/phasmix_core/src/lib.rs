@@ -3,7 +3,7 @@ pub mod likelihood;
 
 use core::fmt;
 use itertools::izip;
-use psnailder_math::{arctan2_wide, expit, expit_wide};
+use phasmix_math::{arctan2_wide, expit, expit_wide};
 use wide::f64x4;
 
 pub use likelihood::ln_likelihood;

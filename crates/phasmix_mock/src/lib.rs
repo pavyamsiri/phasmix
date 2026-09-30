@@ -1,5 +1,5 @@
-use psnailder_core::PSpiralComponent;
-use psnailder_core::usize_to_f64;
+use phasmix_core::PSpiralComponent;
+use phasmix_core::usize_to_f64;
 use rand::RngExt as _;
 
 /// An interface representing components of a mock data model.

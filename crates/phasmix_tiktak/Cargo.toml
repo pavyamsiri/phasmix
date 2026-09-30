@@ -1,5 +1,5 @@
 [package]
-name = "psnailder_tiktak"
+name = "phasmix_tiktak"
 version = "0.0.0"
 edition = "2024"
 
@@ -13,7 +13,7 @@ ndarray = { workspace = true }
 rayon = { workspace = true }
 sobol = { workspace = true }
 sobol_burley = { workspace = true }
-psnailder_core = { workspace = true }
+phasmix_core = { workspace = true }
 
 [lints]
 workspace = true

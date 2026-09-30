@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use psnailder_math::arctan2_vec;
-use psnailder_math::arctan2_vec_simd;
+use phasmix_math::arctan2_vec;
+use phasmix_math::arctan2_vec_simd;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
 use rand::rngs::SmallRng;

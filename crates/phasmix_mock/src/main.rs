@@ -1,7 +1,7 @@
-use psnailder_core::PSpiralComponent;
-use psnailder_core::Winding;
-use psnailder_core::usize_to_f64;
-use psnailder_mock::{
+use phasmix_core::PSpiralComponent;
+use phasmix_core::Winding;
+use phasmix_core::usize_to_f64;
+use phasmix_mock::{
     BackgroundComponent, GaussianComponent, MockGridResult, MockModel, SignalComponent,
 };
 

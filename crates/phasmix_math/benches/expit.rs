@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use psnailder_math::expit;
-use psnailder_math::expit_linear;
+use phasmix_math::expit;
+use phasmix_math::expit_linear;
 use rand::RngExt as _;
 use rand::SeedableRng as _;
 use rand::rngs::SmallRng;

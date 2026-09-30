@@ -1,7 +1,7 @@
-use psnailder_core::Winding;
-use psnailder_core::{PSpiralComponent, create_sigmoid_mask};
-use psnailder_fit::{PSpiralFitter, PSpiralFitterND};
-use psnailder_mock::{BackgroundComponent, GaussianComponent, MockModel, SignalComponent};
+use phasmix_core::Winding;
+use phasmix_core::{PSpiralComponent, create_sigmoid_mask};
+use phasmix_fit::{PSpiralFitter, PSpiralFitterND};
+use phasmix_mock::{BackgroundComponent, GaussianComponent, MockModel, SignalComponent};
 
 fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
     let step = (end - start) / (n - 1) as f64;
@@ -48,9 +48,9 @@ fn main() {
     let mock_result = model.mock_grid(&x_edges, &y_edges, 1_000_000);
 
     let tiktak1d =
-        psnailder_tiktak::TikTak::<6>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
+        phasmix_tiktak::TikTak::<6>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let tiktak2d =
-        psnailder_tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
+        phasmix_tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let fitter = PSpiralFitter {
         fitter_single: PSpiralFitterND {
             tiktak: tiktak1d,
@@ -77,7 +77,7 @@ fn main() {
         rtol: 0.0,
     };
 
-    let mask_func = create_sigmoid_mask(psnailder_math::expit, 1.0, 40.0);
+    let mask_func = create_sigmoid_mask(phasmix_math::expit, 1.0, 40.0);
     let mask: Vec<f64> = mock_result
         .mesh_x
         .iter()

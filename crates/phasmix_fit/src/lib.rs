@@ -13,8 +13,8 @@ use alloc::sync::Arc;
 use basin::{BoxConstraints, CostFunction};
 use core::convert;
 use itertools::izip;
-use psnailder_core::{PSpiralComponent, PSpiralModel, Winding, ln_likelihood};
-use psnailder_tiktak::{DynamicTikTak, TikTak};
+use phasmix_core::{PSpiralComponent, PSpiralModel, Winding, ln_likelihood};
+use phasmix_tiktak::{DynamicTikTak, TikTak};
 use wide::CmpLe as _;
 use wide::f64x4;
 
