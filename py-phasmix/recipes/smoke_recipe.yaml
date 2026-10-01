@@ -1,0 +1,42 @@
+format: phasmix
+version: 1
+sampler: grid-jitter-v1
+grid:
+  x:
+    min: -1.2
+    max: 1.2
+    bins: 100
+  y:
+    min: -60.0
+    max: 60.0
+    bins: 100
+background:
+- type: gaussian-v1
+  parameters:
+    x_scale: 1
+    y_scale: 40.0
+    amplitude: 1
+    variance: 0.25
+signal:
+- type: alinder-v1
+  parameters:
+    alpha: 0.5
+    b: 0.05
+    c: 0.002
+    theta0: -1.5707963267948966
+    scale_factor: 40.0
+    rho: 0.09
+- type: alinder-v1
+  parameters:
+    alpha: 0.5
+    b: 0.05
+    c: 0.002
+    theta0: 1.5707963267948966
+    scale_factor: 40.0
+    rho: 0.09
+sampling:
+  count: 100000
+  seed: 354310
+  bit_generator: PCG64
+metadata:
+  description: smoke

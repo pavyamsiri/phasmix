@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from phasmock.component import AlinderComponent, GaussianComponent
 from phasmock.mock import MockModel
+from phasmock.recipe import MockRecipe, RngSpec
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -69,69 +71,32 @@ class MockData:
 
 
 def _generate_mock() -> MockData:
-    signal1 = AlinderComponent(
-        alpha=0.5,
-        b=0.05,
-        c=0.002,
-        theta0=-np.pi / 2,
-        scale_factor=40.00,
-        rho=0.09,
-        winding=1,
-    )
-    signal2 = AlinderComponent(
-        alpha=0.5,
-        b=0.05,
-        c=0.002,
-        theta0=np.pi / 2,
-        scale_factor=40.00,
-        rho=0.09,
-        winding=1,
-    )
-    background_comp = GaussianComponent(x_scale=1, y_scale=40.0, amplitude=1, variance=0.25)
-
-    mock_model = MockModel(
-        (signal1, signal2),
-        (background_comp,),
-    )
-
-    log.info("%d-arm model", len(mock_model._signal))
-
-    num_x_bins = 100
-    num_y_bins = 100
-    x_edges = np.linspace(-1.2, 1.2, num_x_bins + 1)
-    y_edges = np.linspace(-60.0, 60.0, num_y_bins + 1)
-
-    x_centres = 0.5 * (x_edges[:-1] + x_edges[1:])
-    y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
-    x_mesh, y_mesh = np.meshgrid(x_centres, y_centres)
-
-    num_particles: int = 100_000
-    log.info("Sampling %d particles...", num_particles)
-    particles = mock_model.mock_particles(num_particles, x_edges, y_edges, rng=1)
+    smoke_recipe = MockRecipe.from_yaml(Path(__name__).parent / "recipes/smoke_recipe.yaml")
+    particles = smoke_recipe.generate()
     z_samples = particles.x
     vz_samples = particles.y
 
-    density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
+    density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
     density = density.T
 
     log.info("Generating initial background estimate via KDE...")
-    initial_background = generate_initial_background(z_samples, vz_samples, x_mesh, y_mesh)
+    initial_background = generate_initial_background(z_samples, vz_samples, smoke_recipe.x_mesh, smoke_recipe.y_mesh)
     # Normalize initial background
     initial_background = initial_background / np.sum(initial_background) * np.sum(density)
 
-    mask = fit.create_sigmoid_mask(1.0, 40.0)(x_mesh, y_mesh)
+    mask = fit.create_sigmoid_mask(1.0, 40.0)(smoke_recipe.x_mesh, smoke_recipe.y_mesh)
 
     log.info("ln likelihood (null) = %f", ln_likelihood(density, initial_background, mask))
     return MockData(
         density=density,
         background=initial_background,
         mask=mask,
-        x_edges=x_edges,
-        x_centres=x_centres,
-        x_mesh=x_mesh,
-        y_edges=y_edges,
-        y_centres=y_centres,
-        y_mesh=y_mesh,
+        x_edges=smoke_recipe.x_edges,
+        x_centres=smoke_recipe.x_centres,
+        x_mesh=smoke_recipe.x_mesh,
+        y_edges=smoke_recipe.y_edges,
+        y_centres=smoke_recipe.y_centres,
+        y_mesh=smoke_recipe.y_mesh,
     )
 
 
