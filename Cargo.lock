@@ -955,6 +955,7 @@ dependencies = [
  "itertools 0.14.0",
  "ndarray 0.16.1",
  "phasmix_core",
+ "phasmix_deopt",
  "phasmix_math",
  "phasmix_mock",
  "phasmix_tiktak",

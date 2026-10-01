@@ -253,3 +253,27 @@ the previous behavior. They do not configure the underlying optimizer.
 `result.initial_model` is the selected initial fixed-background fit, not the warm
 start. Treat progress models and their arrays as read-only; they are not deeply
 immutable snapshots.
+
+### Choosing the Rust global optimizer
+
+The Rust backend defaults to TikTak. Select the new Rust differential evolution
+implementation when constructing the fitter:
+
+```python
+from phasmix.fit import PSpiralFitter
+
+fitter = PSpiralFitter(backend="rust", optimizer="differential_evolution")
+# Switch back with optimizer="tiktak".
+```
+
+The choice applies to one- and two-component fits, winding selection, background
+refinement, and batch fitting. Rust differential evolution uses 90 population
+members for one component and 180 for two, with at most 100 generations and
+projected Nelder-Mead polishing. Its population evaluations run in parallel with
+deferred updates. These optimizer limits are separate from `max_iterations`,
+which controls background refinement. The Python backend continues to use SciPy
+differential evolution and does not support TikTak.
+
+Rust callers select `GlobalOptimizer::TikTak(...)` or
+`GlobalOptimizer::DifferentialEvolution(...)` through `PSpiralFitterND.optimizer`.
+The latter accepts a `phasmix_deopt::DifferentialEvolution` with custom settings.

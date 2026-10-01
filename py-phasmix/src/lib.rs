@@ -1,6 +1,6 @@
 use numpy::{PyArray1, PyReadonlyArray1};
 use phasmix_core::{PSpiralComponent as RustComponent, PSpiralModel as RustModel};
-use phasmix_fit::{PSpiralFitter as RustFitter, PSpiralFitterND};
+use phasmix_fit::{GlobalOptimizer, PSpiralFitter as RustFitter, PSpiralFitterND};
 use pyo3::{exceptions::PyValueError, prelude::*};
 use rayon::prelude::*;
 use statrs::distribution::ContinuousCDF;
@@ -191,8 +191,7 @@ impl PSpiralFitIterator {
         let dist =
             statrs::distribution::ChiSquared::new(dof).expect("`freedom` is guaranteed positive.");
         let data = res.data.to_vec();
-        let initial_null =
-            phasmix_core::ln_likelihood(&data, &res.initial_background, &self.mask);
+        let initial_null = phasmix_core::ln_likelihood(&data, &res.initial_background, &self.mask);
         let final_null = phasmix_core::ln_likelihood(&data, &res.final_background, &self.mask);
         Ok(Some(PSpiralFitResult {
             initial_model: PSpiralModel(res.initial_model),
@@ -298,7 +297,7 @@ impl PSpiralFitter {
 #[pymethods]
 impl PSpiralFitter {
     #[new]
-    #[pyo3(signature = (max_iterations=Some(50), atol=0.0, rtol=0.0, sigma_z=2.0, sigma_vz=2.0, bounds=None))]
+    #[pyo3(signature = (max_iterations=Some(50), atol=0.0, rtol=0.0, sigma_z=2.0, sigma_vz=2.0, bounds=None, *, optimizer="tiktak"))]
     fn new(
         max_iterations: Option<usize>,
         atol: f64,
@@ -306,22 +305,33 @@ impl PSpiralFitter {
         sigma_z: f64,
         sigma_vz: f64,
         bounds: Option<Vec<Vec<(f64, f64)>>>,
+        optimizer: &str,
     ) -> PyResult<Self> {
-        // TikTak sampling remains an internal implementation detail until the
-        // runtime parameter-layout path replaces the fixed 1-/2-component path.
-        let num_samples = 4096usize;
-        let tiktak1 = phasmix_tiktak::TikTak::<6>::new(
-            (num_samples as f64).log2() as u8,
-            128.0f32.recip(),
-            0.1,
-            0.995,
-        );
-        let tiktak2 = phasmix_tiktak::TikTak::<12>::new(
-            (num_samples as f64).log2() as u8,
-            128.0f32.recip(),
-            0.1,
-            0.995,
-        );
+        let (optimizer_single, optimizer_double) = match optimizer {
+            "tiktak" => (
+                GlobalOptimizer::TikTak(phasmix_tiktak::TikTak::<6>::new(
+                    12,
+                    128.0f32.recip(),
+                    0.1,
+                    0.995,
+                )),
+                GlobalOptimizer::TikTak(phasmix_tiktak::TikTak::<12>::new(
+                    12,
+                    128.0f32.recip(),
+                    0.1,
+                    0.995,
+                )),
+            ),
+            "differential_evolution" => (
+                GlobalOptimizer::differential_evolution(),
+                GlobalOptimizer::differential_evolution(),
+            ),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "optimizer must be 'tiktak' or 'differential_evolution'",
+                ));
+            }
+        };
 
         let default_bounds = vec![
             (0.0, 1.0),
@@ -366,7 +376,7 @@ impl PSpiralFitter {
         Ok(Self {
             inner: RustFitter {
                 fitter_single: PSpiralFitterND {
-                    tiktak: tiktak1,
+                    optimizer: optimizer_single,
                     alpha_bounds: single.0,
                     b_bounds: single.1,
                     c_bounds: single.2,
@@ -375,7 +385,7 @@ impl PSpiralFitter {
                     rho_bounds: single.5,
                 },
                 fitter_double: PSpiralFitterND {
-                    tiktak: tiktak2,
+                    optimizer: optimizer_double,
                     alpha_bounds: double.0,
                     b_bounds: double.1,
                     c_bounds: double.2,

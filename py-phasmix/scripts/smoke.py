@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmock.component import AlinderComponent, GaussianComponent
 from phasmock.mock import MockModel
-from phasmock.recipe import MockRecipe, RngSpec
+from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
 
 from phasmix import bootstrap_uncertainty, fit
 from phasmix._background_utils import generate_initial_background
 from phasmix._likelihood_utils import ln_likelihood
+from phasmix.bounds import Fixed, ParameterBounds
 from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
@@ -80,9 +80,14 @@ def _generate_mock() -> MockData:
     density = density.T
 
     log.info("Generating initial background estimate via KDE...")
-    initial_background = generate_initial_background(z_samples, vz_samples, smoke_recipe.x_mesh, smoke_recipe.y_mesh)
-    # Normalize initial background
-    initial_background = initial_background / np.sum(initial_background) * np.sum(density)
+    background_model = MockModel(signal=[], background=smoke_recipe.model.background)
+    particles = background_model.mock_particles(
+        smoke_recipe.num_samples, x_edges=smoke_recipe.x_edges, y_edges=smoke_recipe.y_edges, rng=None
+    )
+    z_samples = particles.x
+    vz_samples = particles.y
+    initial_background, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
+    initial_background = initial_background.T
 
     mask = fit.create_sigmoid_mask(1.0, 40.0)(smoke_recipe.x_mesh, smoke_recipe.y_mesh)
 
@@ -110,10 +115,14 @@ def _main() -> None:
 
     log.info("--- Rust Version ---")
 
-    fitter_rust = PSpiralFitter(backend="rust", max_iterations=10)
+    fitter_rust = PSpiralFitter(
+        backend="rust",
+        optimizer="differential_evolution",
+        max_iterations=10,
+    )
     start_time = time.perf_counter()
     outcome_rust = fitter_rust.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=False, rng=np.random.default_rng(1)
+        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
     )
     elapsed_rust = time.perf_counter() - start_time
     if isinstance(outcome_rust, fit.FitFailure):
@@ -122,16 +131,20 @@ def _main() -> None:
     res_rust = outcome_rust.result
     log.info("Rust took %.3f seconds", elapsed_rust)
     log.info("Rust refinement attempts: %d", res_rust.num_iterations)
+    log.info("Rust nfev: %d", outcome_rust.diagnostics.nfev)
     log.info("Rust termination: %s", res_rust.reason)
     log.info("Rust final model: %s", res_rust.final_model)
     log.info("Rust final lnl: %.2f", res_rust.lnl)
     log.info("Rust pvalue: %f", res_rust.final_model.pvalue(density, mask))
 
     log.info("--- Python Version ---")
-    fitter_py = PSpiralFitter(backend="python", max_iterations=10)
+    fitter_py = PSpiralFitter(
+        backend="python",
+        max_iterations=10,
+    )
     start_time = time.perf_counter()
     outcome_py = fitter_py.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=False, rng=np.random.default_rng(1)
+        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
     )
     elapsed_py = time.perf_counter() - start_time
     if isinstance(outcome_py, fit.FitFailure):
@@ -140,6 +153,7 @@ def _main() -> None:
     res_py = outcome_py.result
     log.info("Python took %.3f seconds", elapsed_py)
     log.info("Python refinement attempts: %d", res_py.num_iterations)
+    log.info("Python nfev: %d", outcome_py.diagnostics.nfev)
     log.info("Python termination: %s", res_py.reason)
     log.info("Python final model: %s", res_py.final_model)
     log.info("Python final lnl: %.2f", res_py.lnl)

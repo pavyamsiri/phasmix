@@ -35,6 +35,7 @@ phasmix_fit = { path = "crates/phasmix_fit" }
 phasmix_math = { path = "crates/phasmix_math" }
 phasmix_mock = { path = "crates/phasmix_mock" }
 phasmix_tiktak = { path = "crates/phasmix_tiktak" }
+phasmix_deopt = { path = "crates/phasmix_deopt" }
 
 [profile.release]
 debug = true

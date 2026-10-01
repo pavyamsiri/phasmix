@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, Final, Literal, override
 
 import numpy as np
 from scipy import special
@@ -89,7 +89,9 @@ class RustFitBackend(FitBackend):
         smoothing_func: _SmoothingFunc | SmoothConfig | None,
         mask_func: _MaskFunc | MaskConfig | None,
         bounds: ParameterBounds | Sequence[ParameterBounds] | None,
+        optimizer: Literal["tiktak", "differential_evolution"] = "tiktak",
     ) -> None:
+        self._optimizer = optimizer
         smooth_config = RustFitBackend._parse_smooth_func(smoothing_func)
 
         self._mask_func: _MaskFunc = RustFitBackend._parse_mask_func(mask_func)
@@ -101,6 +103,7 @@ class RustFitBackend(FitBackend):
             sigma_z=smooth_config.z_scale,
             sigma_vz=smooth_config.vz_scale,
             bounds=self._rust_bounds_components(),
+            optimizer=optimizer,
         )
 
     @staticmethod
@@ -272,7 +275,7 @@ class RustFitBackend(FitBackend):
             winding=request.winding,
             improve_background=request.improve_background,
         )
-        return FitSuccess(result=RustFitBackend._convert_result(res, request), diagnostics=RustFitBackend._rust_diagnostics(res))
+        return FitSuccess(result=RustFitBackend._convert_result(res, request), diagnostics=self._rust_diagnostics(res))
 
     @override
     def fit_events(self, request: FitRequest) -> Iterator[BackendEvent]:
@@ -302,7 +305,7 @@ class RustFitBackend(FitBackend):
         )
         for checkpoint in checkpoints:
             result = RustFitBackend._convert_result(checkpoint, request)
-            diagnostics = RustFitBackend._rust_diagnostics(checkpoint)
+            diagnostics = self._rust_diagnostics(checkpoint)
             if checkpoint.terminal:
                 yield FitSuccess(result=result, diagnostics=diagnostics)
             else:
@@ -357,10 +360,9 @@ class RustFitBackend(FitBackend):
         assert winding in (-1, 1), "Winding should be either -1 or 1."
         return PSpiralModel(parameters, request.z_mesh, request.vz_mesh, background, winding=winding)
 
-    @staticmethod
-    def _rust_diagnostics(rust_result: _RustFitResult) -> OptimizationDiagnostics:
+    def _rust_diagnostics(self, rust_result: _RustFitResult) -> OptimizationDiagnostics:
         return OptimizationDiagnostics(
-            message="Rust TikTak/Nelder-Mead optimization completed.",
+            message=f"Rust {self._optimizer}/Nelder-Mead optimization completed.",
             success=True,
             nfev=rust_result.nfev,
             nit=rust_result.nit,

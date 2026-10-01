@@ -13,6 +13,7 @@ phasmix_core = { workspace = true }
 phasmix_math = { workspace = true }
 phasmix_mock = { workspace = true }
 phasmix_tiktak = { workspace = true }
+phasmix_deopt = { workspace = true }
 
 [lints]
 workspace = true

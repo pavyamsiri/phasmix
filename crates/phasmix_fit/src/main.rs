@@ -1,6 +1,6 @@
 use phasmix_core::Winding;
 use phasmix_core::{PSpiralComponent, create_sigmoid_mask};
-use phasmix_fit::{PSpiralFitter, PSpiralFitterND};
+use phasmix_fit::{GlobalOptimizer, PSpiralFitter, PSpiralFitterND};
 use phasmix_mock::{BackgroundComponent, GaussianComponent, MockModel, SignalComponent};
 
 fn linspace(start: f64, end: f64, n: usize) -> Vec<f64> {
@@ -53,7 +53,7 @@ fn main() {
         phasmix_tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let fitter = PSpiralFitter {
         fitter_single: PSpiralFitterND {
-            tiktak: tiktak1d,
+            optimizer: GlobalOptimizer::TikTak(tiktak1d),
             alpha_bounds: (0.0, 1.0),
             b_bounds: (0.005, 0.1),
             c_bounds: (0.0, 0.004),
@@ -62,7 +62,7 @@ fn main() {
             rho_bounds: (0.0, 0.18),
         },
         fitter_double: PSpiralFitterND {
-            tiktak: tiktak2d,
+            optimizer: GlobalOptimizer::TikTak(tiktak2d),
             alpha_bounds: (0.0, 1.0),
             b_bounds: (0.005, 0.1),
             c_bounds: (0.0, 0.004),

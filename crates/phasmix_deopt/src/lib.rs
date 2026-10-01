@@ -12,6 +12,7 @@ pub struct OptimizationResult {
     pub nfev: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct DifferentialEvolution {
     pub pop_size: usize,
     pub max_iter: usize,

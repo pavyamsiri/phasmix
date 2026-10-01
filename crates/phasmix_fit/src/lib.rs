@@ -11,7 +11,7 @@ pub use parameter_layout::{LayoutError, ParameterBound, ParameterLayout};
 
 use alloc::sync::Arc;
 use basin::{BoxConstraints, CostFunction};
-use core::convert;
+use core::{convert, fmt};
 use itertools::izip;
 use phasmix_core::{PSpiralComponent, PSpiralModel, Winding, ln_likelihood};
 use phasmix_tiktak::{DynamicTikTak, TikTak};
@@ -228,7 +228,7 @@ mod tests {
         // Fixed zero amplitude makes every prediction equal its background.
         // Exercise the real optimizer without depending on parameter recovery.
         PSpiralFitterND {
-            tiktak: TikTak::new(1, 0.25, 0.1, 0.995),
+            optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: (0.0, 0.0),
             b_bounds: (0.05, 0.05),
             c_bounds: (0.002, 0.002),
@@ -272,7 +272,7 @@ mod tests {
         }
         assert_eq!(single.num_free_parameters(), 6);
         double = PSpiralFitterND {
-            tiktak: TikTak::new(1, 0.25, 0.1, 0.995),
+            optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: single.alpha_bounds,
             b_bounds: single.b_bounds,
             c_bounds: single.c_bounds,
@@ -743,13 +743,81 @@ pub fn fit_with_parameter_layout(
     (PSpiralModel { components }, -cost)
 }
 
+/// Select the global optimizer used by a fixed-dimensional spiral fitter.
+/// Both optimizers finish with projected Nelder–Mead refinement.
+pub enum GlobalOptimizer<const N: usize> {
+    /// Sobol exploration followed by local restarts.
+    TikTak(TikTak<N>),
+    /// Differential evolution with deferred, parallel population evaluations.
+    DifferentialEvolution(phasmix_deopt::DifferentialEvolution),
+}
+
+impl<const N: usize> Clone for GlobalOptimizer<N> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::TikTak(optimizer) => Self::TikTak(TikTak {
+                num_samples: optimizer.num_samples,
+                num_star: optimizer.num_star,
+                min_weight: optimizer.min_weight,
+                max_weight: optimizer.max_weight,
+                points: optimizer.points.clone(),
+            }),
+            Self::DifferentialEvolution(optimizer) => {
+                Self::DifferentialEvolution(optimizer.clone())
+            }
+        }
+    }
+}
+
+impl<const N: usize> GlobalOptimizer<N> {
+    /// Construct a differential evolution optimizer with 15 members per parameter.
+    #[must_use]
+    pub const fn differential_evolution() -> Self {
+        Self::DifferentialEvolution(phasmix_deopt::DifferentialEvolution {
+            pop_size: 15 * N,
+            max_iter: 100,
+            atol: 0.0,
+            rtol: 0.01,
+        })
+    }
+
+    fn minimize<C>(
+        &self,
+        objective: &C,
+        bounds: &[(f64, f64)],
+    ) -> Result<phasmix_tiktak::OptimizationResult, phasmix_deopt::OptimizationError<C::Error>>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64>
+            + Clone
+            + fmt::Debug
+            + Sync
+            + Send
+            + BoxConstraints,
+        C::Error: Send + fmt::Display,
+    {
+        match self {
+            Self::TikTak(optimizer) => optimizer
+                .minimize(objective, bounds)
+                .map_err(phasmix_deopt::OptimizationError::CostFunction),
+            Self::DifferentialEvolution(optimizer) => {
+                let result = optimizer.minimize(objective, bounds)?;
+                Ok(phasmix_tiktak::OptimizationResult {
+                    params: result.params,
+                    cost: result.cost,
+                    nfev: result.nfev,
+                })
+            }
+        }
+    }
+}
+
 /// A fitter for phase spiral models with a fixed number of parameters.
 ///
 /// This struct manages the optimization process for a specific dimensionality `N`,
 /// which typically corresponds to the number of components multiplied by the six parameters for a single spiral component.
 pub struct PSpiralFitterND<const N: usize> {
     /// The global optimization engine.
-    pub tiktak: TikTak<N>,
+    pub optimizer: GlobalOptimizer<N>,
     /// The bounds for `alpha`.
     pub alpha_bounds: (f64, f64),
     /// The bounds for `b`.
@@ -767,13 +835,7 @@ pub struct PSpiralFitterND<const N: usize> {
 impl<const N: usize> Clone for PSpiralFitterND<N> {
     fn clone(&self) -> Self {
         Self {
-            tiktak: TikTak {
-                num_samples: self.tiktak.num_samples,
-                num_star: self.tiktak.num_star,
-                min_weight: self.tiktak.min_weight,
-                max_weight: self.tiktak.max_weight,
-                points: self.tiktak.points.clone(),
-            },
+            optimizer: self.optimizer.clone(),
             alpha_bounds: self.alpha_bounds,
             b_bounds: self.b_bounds,
             c_bounds: self.c_bounds,
@@ -1314,7 +1376,7 @@ impl PSpiralFitterND<6> {
             self.rho_bounds.1,
         ];
         let res = self
-            .tiktak
+            .optimizer
             .minimize(
                 &PSpiralModelProblem::<1> {
                     data: initial_density,
@@ -1335,7 +1397,7 @@ impl PSpiralFitterND<6> {
                     self.rho_bounds,
                 ],
             )
-            .expect("no errors!");
+            .expect("phase spiral optimization failed");
 
         let best_model = PSpiralComponent {
             alpha: res.params[0],
@@ -1437,7 +1499,7 @@ impl PSpiralFitterND<12> {
             self.rho_bounds.1,
         ];
         let res = self
-            .tiktak
+            .optimizer
             .minimize(
                 &PSpiralModelProblem::<2> {
                     data: initial_density,
@@ -1464,7 +1526,7 @@ impl PSpiralFitterND<12> {
                     self.rho_bounds,
                 ],
             )
-            .expect("no errors!");
+            .expect("phase spiral optimization failed");
 
         let comp1 = PSpiralComponent {
             alpha: res.params[0],

@@ -50,6 +50,8 @@ class PSpiralFitter:
         sigma_z: float = 2.0,
         sigma_vz: float = 2.0,
         bounds: Sequence[Sequence[tuple[float, float]]] | None = None,
+        *,
+        optimizer: str = "tiktak",
     ) -> None: ...
     def fit_batch(
         self,

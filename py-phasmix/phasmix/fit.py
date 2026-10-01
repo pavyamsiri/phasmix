@@ -99,6 +99,7 @@ class PSpiralFitter:
         self,
         *,
         backend: Literal["python", "rust"] = "python",
+        optimizer: Literal["tiktak", "differential_evolution"] | None = None,
         max_iterations: int | None = 50,
         atol: float = 0.0,
         rtol: float = 0.0,
@@ -113,6 +114,12 @@ class PSpiralFitter:
         backend : {"python", "rust"}
             Backend selected for this fitter instance. The Rust backend currently
             supports only the subset documented by `RustFitBackend`.
+        optimizer : {"tiktak", "differential_evolution"} | None
+            None preserves the backend default: SciPy differential evolution for
+            Python, TikTak for Rust. The Rust backend supports either optimizer;
+            its differential evolution uses 15 members per parameter, at most 100
+            generations, and projected Nelder-Mead polishing. Python supports
+            differential evolution only, with its existing SciPy settings.
         max_iterations : int | None
             Maximum number of refinement attempts, excluding the initial fit.
             Default 50. Zero retains the initial fit; None imposes no iteration
@@ -140,6 +147,9 @@ class PSpiralFitter:
         """
         self._backend: FitBackend
         if backend == "python":
+            if optimizer not in (None, "differential_evolution"):
+                msg = "The Python backend supports only differential_evolution."
+                raise ValueError(msg)
             self._backend = PythonFitBackend(
                 max_iterations=max_iterations,
                 atol=atol,
@@ -156,6 +166,7 @@ class PSpiralFitter:
                 smoothing_func=smoothing_func,
                 mask_func=mask_func,
                 bounds=bounds,
+                optimizer=optimizer if optimizer is not None else "tiktak",
             )
         else:
             msg = "Only `python` and `rust` backends are currently supported."  # pyright: ignore[reportUnreachable]
