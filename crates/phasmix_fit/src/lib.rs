@@ -1070,9 +1070,6 @@ impl Iterator for PSpiralFitterIterative {
             return None;
         }
 
-        // Update the iteration index.
-        self.iteration_index += 1;
-
         let (current_model, ll, nfev) = self.optimize_model();
         self.total_nfev += nfev;
 
@@ -1090,6 +1087,9 @@ impl Iterator for PSpiralFitterIterative {
             self.is_finished = true;
             return Some(self.snapshot());
         }
+
+        // Update the iteration index.
+        self.iteration_index += 1;
 
         let next_background = self.propose_background(&current_model);
         let quality = self.background_quality(&current_model, &next_background);
