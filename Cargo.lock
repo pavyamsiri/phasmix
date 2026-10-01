@@ -931,6 +931,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "phasmix_deopt"
+version = "0.0.0"
+dependencies = [
+ "argmin",
+ "argmin-math",
+ "argmin-observer-slog",
+ "argmin_testfunctions",
+ "basin",
+ "ndarray 0.16.1",
+ "phasmix_core",
+ "rand 0.10.1",
+ "rayon",
+ "sobol",
+ "sobol_burley",
+]
+
+[[package]]
 name = "phasmix_fit"
 version = "0.0.0"
 dependencies = [

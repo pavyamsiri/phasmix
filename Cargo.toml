@@ -6,6 +6,7 @@ members = [
     "crates/phasmix_fit",
     "crates/phasmix_mock",
     "crates/phasmix_math",
+    "crates/phasmix_deopt",
 ]
 resolver = "3"
 

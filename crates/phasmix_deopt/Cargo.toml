@@ -1,0 +1,20 @@
+[package]
+name = "phasmix_deopt"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+argmin = { workspace = true }
+argmin-math = { workspace = true }
+argmin-observer-slog = { workspace = true }
+argmin_testfunctions = { workspace = true }
+basin = { workspace = true }
+ndarray = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+sobol = { workspace = true }
+sobol_burley = { workspace = true }
+phasmix_core = { workspace = true }
+
+[lints]
+workspace = true
