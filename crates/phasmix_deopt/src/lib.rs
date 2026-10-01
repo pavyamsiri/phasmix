@@ -3,6 +3,7 @@ use basin::CostFunction;
 use core::convert;
 use core::{array, error::Error, fmt};
 use rand::{RngExt as _, distr::Uniform, seq::index::sample};
+use rayon::prelude::*;
 
 #[derive(Debug)]
 pub struct OptimizationResult {
@@ -92,6 +93,8 @@ impl<E> From<DifferentialEvolutionError> for OptimizationError<E> {
     }
 }
 
+type EvaluatedPopulation = Vec<(Vec<f64>, f64)>;
+
 const fn replace_nan(cost: f64) -> f64 {
     if cost.is_nan() { f64::INFINITY } else { cost }
 }
@@ -150,6 +153,27 @@ impl DifferentialEvolution {
         mean.is_finite() && std.is_finite() && std <= self.rtol.mul_add(mean.abs(), self.atol)
     }
 
+    fn evaluate_population<C>(
+        cost_func: &C,
+        population: Vec<Vec<f64>>,
+    ) -> Result<EvaluatedPopulation, OptimizationError<C::Error>>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64> + Sync,
+        C::Error: Send,
+    {
+        population
+            .into_par_iter()
+            .map(|parameters| {
+                let cost = replace_nan(
+                    cost_func
+                        .cost(&parameters)
+                        .map_err(OptimizationError::CostFunction)?,
+                );
+                Ok((parameters, cost))
+            })
+            .collect()
+    }
+
     fn polish<C>(
         cost_func: &C,
         best_member: &[f64],
@@ -188,6 +212,10 @@ impl DifferentialEvolution {
 
     /// Globally minimize the given cost function using differential evolution.
     ///
+    /// Initial and trial costs are evaluated in parallel using Rayon. Each
+    /// generation proposes trials from a fixed population and applies selection
+    /// only after all trial evaluations succeed. Random draws remain serial.
+    ///
     /// NaN costs are treated as positive infinity. Existing infinite costs
     /// are preserved. Local polishing uses the objective's box constraints.
     ///
@@ -223,22 +251,17 @@ impl DifferentialEvolution {
                     .map_err(|_error| DifferentialEvolutionError::InvalidBound { index })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let populations: Vec<_> = (0..self.pop_size)
+        let initial_population = (0..self.pop_size)
             .map(|_| {
-                let parameters = uniform_bounds
+                uniform_bounds
                     .iter()
                     .map(|current_bounds| rng.sample(current_bounds))
-                    .collect::<Vec<_>>();
-                let cost = replace_nan(
-                    cost_func
-                        .cost(&parameters)
-                        .map_err(OptimizationError::CostFunction)?,
-                );
-                Ok::<_, OptimizationError<C::Error>>((parameters, cost))
+                    .collect()
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
+        let mut population = Self::evaluate_population(cost_func, initial_population)?;
 
-        let num_members = populations.len();
+        let num_members = population.len();
         // Population lengths need only an approximate floating-point representation
         // for convergence statistics, unlike the exact integer evaluation counter.
         #[expect(
@@ -246,8 +269,6 @@ impl DifferentialEvolution {
             reason = "population length is used only for statistical averaging"
         )]
         let population_size_f64 = num_members as f64;
-        let mut old_population = populations.clone();
-        let mut next_population = populations;
 
         // Step 2: Create donor vectors
         // v[i] = z[a] + F * (z[b] - z[c]) where a, b and c are not equal to i
@@ -257,6 +278,8 @@ impl DifferentialEvolution {
             let next_nfev = nfev
                 .checked_add(evaluations_per_generation)
                 .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+            // Generate trials in order, without changing any parent this generation.
+            let mut trials = Vec::with_capacity(num_members);
             for i in 0..num_members {
                 let indices = sample(&mut rng, num_members - 1, 3);
                 // Sampling three indices is safe after validating pop_size >= 4.
@@ -264,19 +287,19 @@ impl DifferentialEvolution {
                     let index = indices.index(position);
                     if index >= i { index + 1 } else { index }
                 });
-                let donor: Vec<_> = old_population[a_index]
+                let donor: Vec<_> = population[a_index]
                     .0
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
                         value
                             + weight
-                                * (old_population[b_index].0[param_index]
-                                    - old_population[c_index].0[param_index])
+                                * (population[b_index].0[param_index]
+                                    - population[c_index].0[param_index])
                     })
                     .collect();
                 let forced = rng.random_range(0..bounds.len());
-                let new_pop: Vec<_> = old_population[i]
+                let new_pop: Vec<_> = population[i]
                     .0
                     .iter()
                     .enumerate()
@@ -289,26 +312,25 @@ impl DifferentialEvolution {
                     })
                     .collect();
 
-                // Step 3: Compare new vector's cost with old cost
-                let new_cost = replace_nan(
-                    cost_func
-                        .cost(&new_pop)
-                        .map_err(OptimizationError::CostFunction)?,
-                );
-                if new_cost <= old_population[i].1 {
-                    next_population[i] = (new_pop, new_cost);
+                trials.push(new_pop);
+            }
+
+            // Evaluate the complete generation before committing any updates.
+            let evaluated_trials = Self::evaluate_population(cost_func, trials)?;
+            for (parent, trial) in population.iter_mut().zip(evaluated_trials) {
+                if trial.1 <= parent.1 {
+                    *parent = trial;
                 }
             }
-            let converged = self.converged(&next_population, population_size_f64);
+            let converged = self.converged(&population, population_size_f64);
             nfev = next_nfev;
-            old_population.clone_from(&next_population);
             if converged {
                 break;
             }
         }
 
         // Step 4: Select best cost
-        let (best_member, best_cost) = next_population
+        let (best_member, best_cost) = population
             .iter()
             .min_by(|(_, left), (_, right)| left.total_cmp(right))
             .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
