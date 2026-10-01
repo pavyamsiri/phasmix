@@ -1,9 +1,8 @@
-use argmin_testfunctions::rosenbrock;
 use basin::CostFunction;
-use core::{cmp, convert, fmt};
-use phasmix_core::usize_to_f64;
+#[cfg(test)]
+use core::convert;
+use core::{array, error::Error, fmt};
 use rand::{RngExt as _, distr::Uniform, seq::index::sample};
-use rayon::prelude::*;
 
 #[derive(Debug)]
 pub struct OptimizationResult {
@@ -19,20 +18,187 @@ pub struct DifferentialEvolution {
     pub rtol: f64,
 }
 
+/// A failure in the objective or the differential evolution optimizer.
+#[derive(Debug)]
+pub enum OptimizationError<E> {
+    /// An objective evaluation failed, including during local polishing.
+    CostFunction(E),
+    /// The optimizer configuration or bookkeeping is invalid.
+    DifferentialEvolution(DifferentialEvolutionError),
+}
+
+/// Errors specific to differential evolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DifferentialEvolutionError {
+    /// `rand/1` requires at least four population members.
+    PopulationTooSmall { size: usize },
+    /// At least one parameter is required.
+    EmptyBounds,
+    /// A bound is non-finite, reversed, or cannot be sampled safely.
+    InvalidBound { index: usize },
+    /// Polishing must use the same bounds as the global search.
+    InconsistentBoxConstraints,
+    /// Tolerances must be finite and nonnegative.
+    InvalidTolerance,
+    /// The evaluation count cannot be represented as a `u64`.
+    EvaluationCountOverflow,
+    /// No population member is available for selection.
+    EmptyPopulation,
+}
+
+impl fmt::Display for DifferentialEvolutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PopulationTooSmall { size } => {
+                write!(f, "population size {size} is smaller than four")
+            }
+            Self::EmptyBounds => f.write_str("at least one parameter bound is required"),
+            Self::InvalidBound { index } => {
+                write!(f, "invalid or unsampleable bound at index {index}")
+            }
+            Self::InconsistentBoxConstraints => {
+                f.write_str("objective box constraints do not match the search bounds")
+            }
+            Self::InvalidTolerance => f.write_str("tolerances must be finite and nonnegative"),
+            Self::EvaluationCountOverflow => f.write_str("function evaluation count exceeds u64"),
+            Self::EmptyPopulation => f.write_str("cannot select from an empty population"),
+        }
+    }
+}
+
+impl Error for DifferentialEvolutionError {}
+
+impl<E: fmt::Display> fmt::Display for OptimizationError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CostFunction(error) => write!(f, "objective evaluation failed: {error}"),
+            Self::DifferentialEvolution(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for OptimizationError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::CostFunction(error) => Some(error),
+            Self::DifferentialEvolution(error) => Some(error),
+        }
+    }
+}
+
+impl<E> From<DifferentialEvolutionError> for OptimizationError<E> {
+    fn from(error: DifferentialEvolutionError) -> Self {
+        Self::DifferentialEvolution(error)
+    }
+}
+
+const fn replace_nan(cost: f64) -> f64 {
+    if cost.is_nan() { f64::INFINITY } else { cost }
+}
+
 impl DifferentialEvolution {
+    fn validate<C>(
+        &self,
+        cost_func: &C,
+        bounds: &[(f64, f64)],
+    ) -> Result<(), DifferentialEvolutionError>
+    where
+        C: basin::BoxConstraints<Param = Vec<f64>>,
+    {
+        if self.pop_size < 4 {
+            return Err(DifferentialEvolutionError::PopulationTooSmall {
+                size: self.pop_size,
+            });
+        }
+        if bounds.is_empty() {
+            return Err(DifferentialEvolutionError::EmptyBounds);
+        }
+        if !self.atol.is_finite() || self.atol < 0.0 || !self.rtol.is_finite() || self.rtol < 0.0 {
+            return Err(DifferentialEvolutionError::InvalidTolerance);
+        }
+        for (index, &(lower, upper)) in bounds.iter().enumerate() {
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(DifferentialEvolutionError::InvalidBound { index });
+            }
+        }
+        #[expect(
+            clippy::float_cmp,
+            reason = "global search and polishing must use identical bounds"
+        )]
+        let matching_bounds = cost_func.lower().len() == bounds.len()
+            && cost_func.upper().len() == bounds.len()
+            && bounds.iter().enumerate().all(|(index, &(lower, upper))| {
+                cost_func.lower()[index] == lower && cost_func.upper()[index] == upper
+            });
+        if !matching_bounds {
+            return Err(DifferentialEvolutionError::InconsistentBoxConstraints);
+        }
+        Ok(())
+    }
+
+    fn converged(&self, population: &[(Vec<f64>, f64)], population_size: f64) -> bool {
+        let mean = population.iter().map(|(_, cost)| *cost).sum::<f64>() / population_size;
+        let variance = population
+            .iter()
+            .map(|(_, cost)| {
+                let residual = cost - mean;
+                residual * residual
+            })
+            .sum::<f64>()
+            / population_size;
+        let std = variance.sqrt();
+        mean.is_finite() && std.is_finite() && std <= self.rtol.mul_add(mean.abs(), self.atol)
+    }
+
+    fn polish<C>(
+        cost_func: &C,
+        best_member: &[f64],
+        best_cost: f64,
+        nfev: u64,
+    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64> + Clone + basin::BoxConstraints,
+    {
+        let polished = basin::Executor::new(
+            cost_func.clone(),
+            basin::NelderMead::standard().projected(),
+            basin::BasicSimplexState::new(best_member.to_owned()),
+        )
+        .max_iter(200)
+        .run()
+        .map_err(OptimizationError::CostFunction)?;
+        let nfev = nfev
+            .checked_add(polished.cost_evals())
+            .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+        let polished_cost = replace_nan(polished.best_cost());
+        if polished_cost <= best_cost {
+            Ok(OptimizationResult {
+                params: polished.best_param().to_owned(),
+                cost: polished_cost,
+                nfev,
+            })
+        } else {
+            Ok(OptimizationResult {
+                params: best_member.to_owned(),
+                cost: best_cost,
+                nfev,
+            })
+        }
+    }
+
     /// Globally minimize the given cost function using differential evolution.
     ///
-    /// # Panics
-    /// Can panic. TODO: Avoid panicking.
+    /// NaN costs are treated as positive infinity. Existing infinite costs
+    /// are preserved. Local polishing uses the objective's box constraints.
     ///
     /// # Errors
-    /// Can error. TODO: Need to implement proper error handling.
-    ///
+    /// Returns an error for invalid settings or bounds, an overflowing evaluation
+    /// count, or an objective failure during initialization, evolution, or polishing.
     pub fn minimize<C>(
         &self,
         cost_func: &C,
         bounds: &[(f64, f64)],
-    ) -> Result<OptimizationResult, C::Error>
+    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
             + Clone
@@ -42,61 +208,80 @@ impl DifferentialEvolution {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
+        self.validate(cost_func, bounds)?;
+        let evaluations_per_generation = u64::try_from(self.pop_size)
+            .map_err(|_error| DifferentialEvolutionError::EvaluationCountOverflow)?;
+        let mut nfev = evaluations_per_generation;
+
         // Step 1: Create initial population
         let mut rng = rand::rng();
         let uniform_bounds = bounds
             .iter()
-            .map(|(lb, ub)| Uniform::new_inclusive(lb, ub))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("bounds are invalid.");
+            .enumerate()
+            .map(|(index, &(lower, upper))| {
+                Uniform::new_inclusive(lower, upper)
+                    .map_err(|_error| DifferentialEvolutionError::InvalidBound { index })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let populations: Vec<_> = (0..self.pop_size)
             .map(|_| {
                 let parameters = uniform_bounds
                     .iter()
                     .map(|current_bounds| rng.sample(current_bounds))
                     .collect::<Vec<_>>();
-                let cost = cost_func.cost(&parameters)?;
-                Ok((parameters, cost))
+                let cost = replace_nan(
+                    cost_func
+                        .cost(&parameters)
+                        .map_err(OptimizationError::CostFunction)?,
+                );
+                Ok::<_, OptimizationError<C::Error>>((parameters, cost))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        println!("populations = {populations:?}");
 
-        let mut next_population = populations.clone();
+        let num_members = populations.len();
+        // Population lengths need only an approximate floating-point representation
+        // for convergence statistics, unlike the exact integer evaluation counter.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "population length is used only for statistical averaging"
+        )]
+        let population_size_f64 = num_members as f64;
+        let mut old_population = populations.clone();
+        let mut next_population = populations;
 
         // Step 2: Create donor vectors
         // v[i] = z[a] + F * (z[b] - z[c]) where a, b and c are not equal to i
         let weight = 0.7;
         let crossover = 0.7;
-        let max_generations = 100;
-        let mut num_generations = 0;
-        for _ in 0..max_generations {
-            for i in 0..populations.len() {
-                let indices = sample(&mut rng, populations.len() - 1, 3);
-                let [a_index, b_index, c_index] = indices
-                    .into_iter()
-                    .map(|j| if j >= i { j + 1 } else { j })
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-                let donor: Vec<_> = populations[a_index]
+        for _ in 0..self.max_iter {
+            let next_nfev = nfev
+                .checked_add(evaluations_per_generation)
+                .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+            for i in 0..num_members {
+                let indices = sample(&mut rng, num_members - 1, 3);
+                // Sampling three indices is safe after validating pop_size >= 4.
+                let [a_index, b_index, c_index] = array::from_fn(|position| {
+                    let index = indices.index(position);
+                    if index >= i { index + 1 } else { index }
+                });
+                let donor: Vec<_> = old_population[a_index]
                     .0
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
                         value
                             + weight
-                                * (populations[b_index].0[param_index]
-                                    - populations[c_index].0[param_index])
+                                * (old_population[b_index].0[param_index]
+                                    - old_population[c_index].0[param_index])
                     })
                     .collect();
-                let forced = rng.sample(Uniform::new(0, bounds.len()).unwrap());
-                let new_pop: Vec<_> = populations[i]
+                let forced = rng.random_range(0..bounds.len());
+                let new_pop: Vec<_> = old_population[i]
                     .0
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
-                        let keep_value: f64 = rng.random();
-                        if param_index == forced || keep_value < crossover {
+                        if param_index == forced || rng.random::<f64>() < crossover {
                             donor[param_index].clamp(bounds[param_index].0, bounds[param_index].1)
                         } else {
                             *value
@@ -105,71 +290,31 @@ impl DifferentialEvolution {
                     .collect();
 
                 // Step 3: Compare new vector's cost with old cost
-                let new_cost = cost_func.cost(&new_pop).unwrap_or(f64::INFINITY);
-                if new_cost <= populations[i].1 {
+                let new_cost = replace_nan(
+                    cost_func
+                        .cost(&new_pop)
+                        .map_err(OptimizationError::CostFunction)?,
+                );
+                if new_cost <= old_population[i].1 {
                     next_population[i] = (new_pop, new_cost);
                 }
             }
-            let mean_costs = next_population.iter().map(|(_, cost)| *cost).sum::<f64>()
-                / (next_population.len() as f64);
-            let variance = next_population
-                .iter()
-                .map(|(_, cost)| {
-                    let residual = cost - mean_costs;
-                    residual * residual
-                })
-                .sum::<f64>()
-                / (next_population.len() as f64);
-            let std_costs = variance.sqrt();
-            let converged = std_costs <= self.rtol.mul_add(mean_costs.abs(), self.atol);
-            println!(
-                "convergence ({converged}): {std_costs} <= {} + {} * {}",
-                self.atol,
-                self.rtol,
-                mean_costs.abs()
-            );
-            num_generations += 1;
+            let converged = self.converged(&next_population, population_size_f64);
+            nfev = next_nfev;
+            old_population.clone_from(&next_population);
             if converged {
                 break;
             }
         }
 
         // Step 4: Select best cost
-        println!("next population = {next_population:?}");
-        let (best_index, (best_member, best_cost)) = next_population
+        let (best_member, best_cost) = next_population
             .iter()
-            .enumerate()
-            .min_by(|(_, (_, a_cost)), (_, (_, b_cost))| a_cost.partial_cmp(b_cost).unwrap())
-            .unwrap();
-        println!("best member = {best_member:?}");
-        println!("best cost = {best_cost}");
-        println!("best index = {best_index}");
-        println!(
-            "best neighbourhood = {:?}",
-            &next_population[best_index - 1..best_index + 3]
-        );
-
-        let nfev: u64 = (self.pop_size * (num_generations + 1)).try_into().unwrap();
+            .min_by(|(_, left), (_, right)| left.total_cmp(right))
+            .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
 
         // Step 5: Polish best result
-        match basin::Executor::new(
-            cost_func.clone(),
-            basin::NelderMead::standard().projected(),
-            basin::BasicSimplexState::new(best_member.to_owned()),
-        )
-        .max_iter(200)
-        .run()
-        {
-            Ok(res) => {
-                let best_param = res.best_param();
-                Ok(OptimizationResult {
-                    cost: res.best_cost(),
-                    params: best_param.to_owned(),
-                    nfev: nfev + res.cost_evals(),
-                })
-            }
-            Err(err) => panic!("restart failed: {err}"),
-        }
+        Self::polish(cost_func, best_member, *best_cost, nfev)
     }
 }
 
@@ -222,8 +367,12 @@ mod tests {
 
         assert!(res.is_ok());
 
-        let Ok(res) = res;
+        let Ok(res) = res else {
+            panic!("Assert should've caught it earlier.");
+        };
 
+        println!("cost = {}", res.cost);
+        println!("params = {:?}", res.params);
         println!("nfev = {}", res.nfev);
     }
 }
