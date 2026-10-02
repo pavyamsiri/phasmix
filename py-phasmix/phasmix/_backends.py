@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import numpy as np
     from optype import numpy as onp
 
+    from .bounds import ParameterBounds
     from .model import PSpiralModel
 
 
@@ -297,6 +298,13 @@ class SigmoidMaskConfig(MaskConfig):
 
 
 class FitBackend(Protocol):
+    @property
+    def local_optimizer_maxiter(self) -> int: ...
+
+    def component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]: ...
+    def update_bounds(self, bounds: ParameterBounds | Sequence[ParameterBounds]) -> None: ...
+    def with_local_optimizer(self, *, maxiter: int) -> FitBackend: ...
+
     def fit(self, request: FitRequest) -> BackendResult: ...
     def fit_batch(self, requests: Sequence[FitRequest], *, workers: int | None = None) -> list[BackendResult]:
         """Return one terminal outcome per request, in input order."""

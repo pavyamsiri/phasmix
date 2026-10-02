@@ -1,3 +1,6 @@
+extern crate alloc;
+
+use alloc::borrow::Cow;
 use numpy::{PyArray1, PyReadonlyArray1};
 use phasmix_core::{PSpiralComponent as RustComponent, PSpiralModel as RustModel};
 use phasmix_fit::{GlobalOptimizer, PSpiralFitter as RustFitter, PSpiralFitterND};
@@ -164,6 +167,10 @@ pub struct PSpiralFitResult {
     #[pyo3(get)]
     pub nit: u64,
     #[pyo3(get)]
+    pub optimizer_success: bool,
+    #[pyo3(get)]
+    pub optimizer_message: String,
+    #[pyo3(get)]
     pub terminal: bool,
 }
 
@@ -183,7 +190,7 @@ impl PSpiralFitIterator {
         let Some(iterator) = self.inner.as_mut() else {
             return Ok(None);
         };
-        let Some(res) = iterator.next() else {
+        let Some(res) = py.detach(|| iterator.next()) else {
             self.inner = None;
             return Ok(None);
         };
@@ -207,6 +214,8 @@ impl PSpiralFitIterator {
             final_pvalue: dist.sf(-2.0 * (final_null - res.final_lnl)),
             nfev: res.nfev,
             nit: res.nit,
+            optimizer_success: res.optimizer_success,
+            optimizer_message: res.optimizer_message,
             terminal: res.terminal,
         }))
     }
@@ -289,15 +298,51 @@ impl PSpiralFitter {
             final_pvalue,
             nfev: res.nfev,
             nit: res.nit,
+            optimizer_success: res.optimizer_success,
+            optimizer_message: res.optimizer_message,
             terminal: res.terminal,
         })
+    }
+}
+
+impl PSpiralFitter {
+    fn fitter_with_warm_start(
+        &self,
+        count: Option<usize>,
+        warm_start: Option<Vec<f64>>,
+    ) -> PyResult<Cow<'_, RustFitter>> {
+        if warm_start.is_none() {
+            if matches!(
+                self.inner.fitter_single.optimizer,
+                GlobalOptimizer::NelderMead { .. }
+            ) {
+                return Err(PyValueError::new_err(
+                    "nelder_mead requires a warm_start and explicit component count",
+                ));
+            }
+            return Ok(Cow::Borrowed(&self.inner));
+        }
+        let mut fitter = self.inner.clone();
+        if warm_start.is_some() {
+            let result = match count {
+                Some(1) => fitter.fitter_single.set_warm_start(warm_start),
+                Some(2) => fitter.fitter_double.set_warm_start(warm_start),
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "warm start requires an explicit component count",
+                    ));
+                }
+            };
+            result.map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        Ok(Cow::Owned(fitter))
     }
 }
 
 #[pymethods]
 impl PSpiralFitter {
     #[new]
-    #[pyo3(signature = (max_iterations=Some(50), atol=0.0, rtol=0.0, sigma_z=2.0, sigma_vz=2.0, bounds=None, *, optimizer="tiktak"))]
+    #[pyo3(signature = (max_iterations=Some(50), atol=0.0, rtol=0.0, sigma_z=2.0, sigma_vz=2.0, bounds=None, *, optimizer="tiktak", nelder_mead_maxiter=1500))]
     fn new(
         max_iterations: Option<usize>,
         atol: f64,
@@ -306,8 +351,22 @@ impl PSpiralFitter {
         sigma_vz: f64,
         bounds: Option<Vec<Vec<(f64, f64)>>>,
         optimizer: &str,
+        nelder_mead_maxiter: usize,
     ) -> PyResult<Self> {
+        if nelder_mead_maxiter == 0 {
+            return Err(PyValueError::new_err(
+                "nelder_mead_maxiter must be positive",
+            ));
+        }
         let (optimizer_single, optimizer_double) = match optimizer {
+            "nelder_mead" => (
+                GlobalOptimizer::NelderMead {
+                    max_iter: nelder_mead_maxiter,
+                },
+                GlobalOptimizer::NelderMead {
+                    max_iter: nelder_mead_maxiter,
+                },
+            ),
             "tiktak" => (
                 GlobalOptimizer::TikTak(phasmix_tiktak::TikTak::<6>::new(
                     12,
@@ -328,7 +387,7 @@ impl PSpiralFitter {
             ),
             _ => {
                 return Err(PyValueError::new_err(
-                    "optimizer must be 'tiktak' or 'differential_evolution'",
+                    "optimizer must be 'tiktak', 'differential_evolution', or 'nelder_mead'",
                 ));
             }
         };
@@ -373,9 +432,11 @@ impl PSpiralFitter {
         let single = bounds_for(&component_bounds[0]);
         let double = bounds_for(&component_bounds[1]);
 
-        Ok(Self {
+        let mut fitter = Self {
             inner: RustFitter {
                 fitter_single: PSpiralFitterND {
+                    warm_start: None,
+                    parameter_bounds: None,
                     optimizer: optimizer_single,
                     alpha_bounds: single.0,
                     b_bounds: single.1,
@@ -385,6 +446,8 @@ impl PSpiralFitter {
                     rho_bounds: single.5,
                 },
                 fitter_double: PSpiralFitterND {
+                    warm_start: None,
+                    parameter_bounds: None,
                     optimizer: optimizer_double,
                     alpha_bounds: double.0,
                     b_bounds: double.1,
@@ -399,14 +462,54 @@ impl PSpiralFitter {
                 atol,
                 rtol,
             },
-        })
+        };
+        fitter.update_bounds(component_bounds)?;
+        Ok(fitter)
+    }
+
+    /// Validate and atomically replace component bounds on the native fitter.
+    pub fn update_bounds(&mut self, bounds: Vec<Vec<(f64, f64)>>) -> PyResult<()> {
+        if bounds.is_empty()
+            || bounds.len() > 2
+            || bounds.iter().any(|component| component.len() != 6)
+        {
+            return Err(PyValueError::new_err(
+                "bounds must contain one or two sets of six parameter bounds",
+            ));
+        }
+        let single = bounds[0].clone();
+        let mut double = single.clone();
+        double.extend_from_slice(bounds.get(1).unwrap_or(&bounds[0]));
+        let mut inner = self.inner.clone();
+        inner
+            .fitter_single
+            .update_bounds(single)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        inner
+            .fitter_double
+            .update_bounds(double)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    /// Copy the native fitter with one local Nelder–Mead search per winding candidate.
+    #[pyo3(signature = (*, maxiter=1500))]
+    pub fn with_local_optimizer(&self, maxiter: usize) -> PyResult<Self> {
+        if maxiter == 0 {
+            return Err(PyValueError::new_err("maxiter must be positive"));
+        }
+        let mut inner = self.inner.clone();
+        inner.fitter_single.optimizer = GlobalOptimizer::NelderMead { max_iter: maxiter };
+        inner.fitter_double.optimizer = GlobalOptimizer::NelderMead { max_iter: maxiter };
+        Ok(Self { inner })
     }
 
     #[expect(
         clippy::too_many_arguments,
         reason = "API would be overly complicated in order to reduce number of arguments."
     )]
-    #[pyo3(signature = (initial_density, initial_background, mask, mesh_x, mesh_y, shape, *, num_components=None, winding=None, improve_background=true))]
+    #[pyo3(signature = (initial_density, initial_background, mask, mesh_x, mesh_y, shape, *, num_components=None, winding=None, improve_background=true, warm_start=None))]
     pub fn fit_spiral_with_background<'py>(
         &self,
         py: Python<'py>,
@@ -419,41 +522,46 @@ impl PSpiralFitter {
         num_components: Option<usize>,
         winding: Option<i8>,
         improve_background: bool,
+        warm_start: Option<Vec<f64>>,
     ) -> PyResult<PSpiralFitResult> {
         let winding = Self::validate_options(num_components, winding)?;
-        let initial_density = initial_density.as_slice()?;
-        let initial_background = initial_background.as_slice()?;
-        let mask = mask.as_slice()?;
-        let mesh_x = mesh_x.as_slice()?;
-        let mesh_y = mesh_y.as_slice()?;
+        let fitter = self.fitter_with_warm_start(num_components, warm_start)?;
+        let initial_density = initial_density.as_slice()?.to_vec();
+        let initial_background = initial_background.as_slice()?.to_vec();
+        let mask = mask.as_slice()?.to_vec();
+        let mesh_x = mesh_x.as_slice()?.to_vec();
+        let mesh_y = mesh_y.as_slice()?.to_vec();
 
-        let res = self
-            .inner
-            .fit_spiral_with_background_iterative(
-                initial_density,
-                initial_background,
-                mask,
-                mesh_x,
-                mesh_y,
-                shape,
-                num_components,
-                winding,
-                improve_background,
-            )
-            .last()
-            .ok_or_else(|| PyValueError::new_err("fit produced no checkpoints"))?;
+        // Own NumPy inputs before releasing the GIL for the full native fit.
+        let res = py.detach(|| {
+            fitter
+                .fit_spiral_with_background_iterative(
+                    &initial_density,
+                    &initial_background,
+                    &mask,
+                    &mesh_x,
+                    &mesh_y,
+                    shape,
+                    num_components,
+                    winding,
+                    improve_background,
+                )
+                .last()
+                .ok_or_else(|| PyValueError::new_err("fit produced no checkpoints"))
+        })?;
 
-        Self::convert_result(py, res, mask)
+        Self::convert_result(py, res, &mask)
     }
 
     /// Copy a batch into Rust storage, then fit inside one shared Rayon pool.
-    #[pyo3(signature = (inputs, *, workers=None, options=None))]
+    #[pyo3(signature = (inputs, *, workers=None, options=None, warm_starts=None))]
     pub fn fit_batch(
         &self,
         py: Python<'_>,
         inputs: Vec<BatchInput<'_>>,
         workers: Option<usize>,
         options: Option<Vec<(Option<usize>, Option<i8>, bool)>>,
+        warm_starts: Option<Vec<Option<Vec<f64>>>>,
     ) -> PyResult<Vec<PSpiralFitResult>> {
         if workers == Some(0) {
             return Err(PyValueError::new_err("workers must be positive"));
@@ -469,6 +577,17 @@ impl PSpiralFitter {
             .map(|(count, winding, improve)| {
                 Ok((count, Self::validate_options(count, winding)?, improve))
             })
+            .collect::<PyResult<Vec<_>>>()?;
+        let warm_starts = warm_starts.unwrap_or_else(|| vec![None; inputs.len()]);
+        if warm_starts.len() != inputs.len() {
+            return Err(PyValueError::new_err(
+                "warm_starts must match the number of inputs",
+            ));
+        }
+        let fitters = options
+            .iter()
+            .zip(warm_starts)
+            .map(|(&(count, _, _), start)| self.fitter_with_warm_start(count, start))
             .collect::<PyResult<Vec<_>>>()?;
         let owned = inputs
             .into_iter()
@@ -511,8 +630,9 @@ impl PSpiralFitter {
                 owned
                     .par_iter()
                     .zip(&options)
-                    .map(|((arrays, shape), &(count, winding, improve))| {
-                        self.inner
+                    .zip(&fitters)
+                    .map(|(((arrays, shape), &(count, winding, improve)), fitter)| {
+                        fitter
                             .fit_spiral_with_background_iterative(
                                 &arrays[0], &arrays[1], &arrays[2], &arrays[3], &arrays[4], *shape,
                                 count, winding, improve,
@@ -535,7 +655,7 @@ impl PSpiralFitter {
         clippy::too_many_arguments,
         reason = "This mirrors the batch fitting API for event checkpoints."
     )]
-    #[pyo3(signature = (initial_density, initial_background, mask, mesh_x, mesh_y, shape, *, num_components=None, winding=None, improve_background=true))]
+    #[pyo3(signature = (initial_density, initial_background, mask, mesh_x, mesh_y, shape, *, num_components=None, winding=None, improve_background=true, warm_start=None))]
     pub fn fit_spiral_with_background_events(
         &self,
         initial_density: PyReadonlyArray1<'_, f64>,
@@ -547,14 +667,16 @@ impl PSpiralFitter {
         num_components: Option<usize>,
         winding: Option<i8>,
         improve_background: bool,
+        warm_start: Option<Vec<f64>>,
     ) -> PyResult<PSpiralFitIterator> {
         let winding = Self::validate_options(num_components, winding)?;
+        let fitter = self.fitter_with_warm_start(num_components, warm_start)?;
         let initial_density = initial_density.as_slice()?;
         let initial_background = initial_background.as_slice()?;
         let mask = mask.as_slice()?;
         let mesh_x = mesh_x.as_slice()?;
         let mesh_y = mesh_y.as_slice()?;
-        let results = self.inner.fit_spiral_with_background_iterative(
+        let results = fitter.fit_spiral_with_background_iterative(
             initial_density,
             initial_background,
             mask,

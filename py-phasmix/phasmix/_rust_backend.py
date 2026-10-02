@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from copy import copy
 from typing import TYPE_CHECKING, Final, Literal, override
 
 import numpy as np
@@ -89,9 +90,14 @@ class RustFitBackend(FitBackend):
         smoothing_func: _SmoothingFunc | SmoothConfig | None,
         mask_func: _MaskFunc | MaskConfig | None,
         bounds: ParameterBounds | Sequence[ParameterBounds] | None,
-        optimizer: Literal["tiktak", "differential_evolution"] = "tiktak",
+        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"] = "tiktak",
+        nelder_mead_maxiter: int = 1500,
     ) -> None:
+        if type(nelder_mead_maxiter) is not int or nelder_mead_maxiter < 1:
+            msg = "nelder_mead_maxiter must be a positive integer."
+            raise ValueError(msg)
         self._optimizer = optimizer
+        self._nelder_mead_maxiter = nelder_mead_maxiter
         smooth_config = RustFitBackend._parse_smooth_func(smoothing_func)
 
         self._mask_func: _MaskFunc = RustFitBackend._parse_mask_func(mask_func)
@@ -104,7 +110,29 @@ class RustFitBackend(FitBackend):
             sigma_vz=smooth_config.vz_scale,
             bounds=self._rust_bounds_components(),
             optimizer=optimizer,
+            nelder_mead_maxiter=nelder_mead_maxiter,
         )
+
+    @property
+    def local_optimizer_maxiter(self) -> int:
+        """Default iteration budget for local Nelder-Mead refits."""
+        return self._nelder_mead_maxiter
+
+    def with_local_optimizer(self, *, maxiter: int) -> RustFitBackend:
+        """Copy this backend for one bounded Nelder-Mead search per winding candidate."""
+        if type(maxiter) is not int or maxiter < 1:
+            msg = "maxiter must be a positive integer."
+            raise ValueError(msg)
+        backend = copy(self)
+        backend._nelder_mead_maxiter = maxiter  # noqa: SLF001 -- configure an isolated copy.
+        backend._optimizer = "nelder_mead"  # noqa: SLF001 -- configure an isolated copy.
+        backend._rust_fitter = self._rust_fitter.with_local_optimizer(maxiter=maxiter)  # noqa: SLF001
+        return backend
+
+    def _validate_local_request(self, request: FitRequest) -> None:
+        if self._optimizer == "nelder_mead" and (request.warm_start is None or request.num_components is None):
+            msg = "nelder_mead requires a warm_start and explicit component count."
+            raise ValueError(msg)
 
     @staticmethod
     def _parse_smooth_func(config: _SmoothingFunc | SmoothConfig | None) -> GaussianSmoothConfig:
@@ -135,6 +163,21 @@ class RustFitBackend(FitBackend):
             raise ValueError(msg)
 
         return create_sigmoid_mask(1.0, 40.0)
+
+    def component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]:
+        """Return the bounds selected for the requested model size."""
+        return tuple(self._component_bounds(num_components))
+
+    def update_bounds(self, bounds: ParameterBounds | Sequence[ParameterBounds]) -> None:
+        """Validate and replace bounds for subsequent fits."""
+        candidate = bounds if isinstance(bounds, ParameterBounds) else tuple(bounds)
+        if not isinstance(candidate, ParameterBounds) and not candidate:
+            msg = "bounds must be a ParameterBounds or a nonempty sequence of ParameterBounds."
+            raise ValueError(msg)
+        configured = copy(self)
+        configured._bounds = candidate  # noqa: SLF001 -- validate on an isolated copy.
+        self._rust_fitter.update_bounds(configured._rust_bounds_components())  # noqa: SLF001 -- internal configuration copy.
+        self._bounds = candidate
 
     def _component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]:
         """Apply Python's broadcasting/prefix rules before native conversion."""
@@ -202,6 +245,7 @@ class RustFitBackend(FitBackend):
             ]
         ] = []
         for index, request in enumerate(requests):
+            self._validate_local_request(request)
             unsupported = self._unsupported_reason(request)
             if unsupported is not None:
                 outcomes[index] = self._failure(unsupported)
@@ -239,6 +283,10 @@ class RustFitBackend(FitBackend):
             native_results = self._rust_fitter.fit_batch(
                 inputs,
                 workers=workers,
+                warm_starts=[
+                    None if request.warm_start is None else request.warm_start.tolist()
+                    for request in (requests[index] for index in indices)
+                ],
                 options=[
                     (requests[index].num_components, requests[index].winding, requests[index].improve_background)
                     for index in indices
@@ -253,6 +301,7 @@ class RustFitBackend(FitBackend):
 
     @override
     def fit(self, request: FitRequest) -> BackendResult:
+        self._validate_local_request(request)
         unsupported = self._unsupported_reason(request)
         if unsupported is not None:
             return self._failure(unsupported)
@@ -274,12 +323,14 @@ class RustFitBackend(FitBackend):
             num_components=request.num_components,
             winding=request.winding,
             improve_background=request.improve_background,
+            warm_start=None if request.warm_start is None else request.warm_start.tolist(),
         )
         return FitSuccess(result=RustFitBackend._convert_result(res, request), diagnostics=self._rust_diagnostics(res))
 
     @override
     def fit_events(self, request: FitRequest) -> Iterator[BackendEvent]:
         """Yield each accepted Rust refinement checkpoint and the terminal result."""
+        self._validate_local_request(request)
         unsupported = self._unsupported_reason(request)
         if unsupported is not None:
             yield self._failure(unsupported)
@@ -302,6 +353,7 @@ class RustFitBackend(FitBackend):
             num_components=request.num_components,
             winding=request.winding,
             improve_background=request.improve_background,
+            warm_start=None if request.warm_start is None else request.warm_start.tolist(),
         )
         for checkpoint in checkpoints:
             result = RustFitBackend._convert_result(checkpoint, request)
@@ -317,10 +369,7 @@ class RustFitBackend(FitBackend):
                 )
 
     def _unsupported_reason(self, request: FitRequest) -> str | None:
-        checks = (
-            (request.num_components not in (None, 1, 2), "Rust backend supports one or two components only."),
-            (request.warm_start is not None, "Rust backend does not yet support warm starts."),
-        )
+        checks = ((request.num_components not in (None, 1, 2), "Rust backend supports one or two components only."),)
         return next((message for condition, message in checks if condition), None)
 
     @staticmethod
@@ -333,6 +382,8 @@ class RustFitBackend(FitBackend):
         reason = FitTerminationReason.CONVERGED if rust_result.converged else FitTerminationReason.ITERATION_LIMIT
         if not request.improve_background:
             reason = FitTerminationReason.FIXED_BACKGROUND
+        elif not rust_result.optimizer_success:
+            reason = FitTerminationReason.FAILED_REOPTIMIZATION
         return PSpiralFitResult(
             initial_model=initial_model,
             final_model=final_model,
@@ -362,8 +413,12 @@ class RustFitBackend(FitBackend):
 
     def _rust_diagnostics(self, rust_result: _RustFitResult) -> OptimizationDiagnostics:
         return OptimizationDiagnostics(
-            message=f"Rust {self._optimizer}/Nelder-Mead optimization completed.",
-            success=True,
+            message=(
+                f"Rust local Nelder-Mead: {rust_result.optimizer_message}"
+                if self._optimizer == "nelder_mead"
+                else f"Rust {self._optimizer}/Nelder-Mead optimization completed."
+            ),
+            success=rust_result.optimizer_success,
             nfev=rust_result.nfev,
             nit=rust_result.nit,
         )

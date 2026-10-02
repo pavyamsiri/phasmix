@@ -10,16 +10,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
+from phasmix import bootstrap_uncertainty, fit
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.fit import PSpiralFitter
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
-
-from phasmix import bootstrap_uncertainty, fit
-from phasmix._background_utils import generate_initial_background
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.bounds import Fixed, ParameterBounds
-from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -59,6 +56,8 @@ def setup_logging() -> Iterable[logging.Handler]:
 
 @dataclass
 class MockData:
+    """Count map, background, and coordinate grids for the benchmark."""
+
     density: onp.Array2D[np.float64]
     background: onp.Array2D[np.float64]
     mask: onp.Array2D[np.float64]
@@ -159,22 +158,42 @@ def _main() -> None:
     log.info("Python final lnl: %.2f", res_py.lnl)
     log.info("Python pvalue: %f", res_py.final_model.pvalue(density, mask))
 
-    log.info("--- Python Bootstrap Errors (fixed background, 200 local refits) ---")
-    start_time = time.perf_counter()
-    uncertainty = bootstrap_uncertainty(fitter_py, res_py, n_resamples=200, seed=2, workers=4)
-    elapsed_bootstrap = time.perf_counter() - start_time
-    log.info("Bootstrap alone took %.3f seconds", elapsed_bootstrap)
-    log.info("Successful local refits: %d/%d", uncertainty.n_successful, len(uncertainty.replicates))
-    log.info("Parameter estimates +/- bootstrap standard errors; 95% percentile intervals:")
+    log.info("--- Bootstrap comparison: same Python reference, seed, counts, and bounds ---")
     parameter_names = ("alpha", "b", "c", "theta0", "scale_factor", "rho")
-    for index, (estimate, error, interval) in enumerate(
-        zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
-    ):
-        component, parameter = divmod(index, len(parameter_names))
-        log.info("\tComponent %d %s", component + 1, parameter_names[parameter])
-        log.info("\t%.6g +/- %.6g [%.6g, %.6g]", estimate, error, interval[0], interval[1])
-    for warning in uncertainty.warnings:
-        log.info("Bootstrap note: %s", warning)
+    for name, bootstrap_fitter in (("Python", fitter_py), ("Rust", fitter_rust)):
+        for workers in (1, 4):
+            start_time = time.perf_counter()
+            uncertainty = bootstrap_uncertainty(bootstrap_fitter, res_py, n_resamples=200, seed=2, workers=workers)
+            elapsed_bootstrap = time.perf_counter() - start_time
+            evaluations = sum(item.diagnostics.nfev or 0 for item in uncertainty.replicates)
+            iterations = sum(item.diagnostics.nit or 0 for item in uncertainty.replicates)
+            log.info(
+                "%s bootstrap: %.3fs, workers=%d, successful=%d/%d, nfev=%d, nit=%d",
+                name,
+                elapsed_bootstrap,
+                workers,
+                uncertainty.n_successful,
+                len(uncertainty.replicates),
+                evaluations,
+                iterations,
+            )
+            if workers == 4:
+                for index, (estimate, error, interval) in enumerate(
+                    zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
+                ):
+                    component, parameter = divmod(index, len(parameter_names))
+                    log.info(
+                        "%s component %d %s: %.6g +/- %.6g [%.6g, %.6g]",
+                        name,
+                        component + 1,
+                        parameter_names[parameter],
+                        interval[1],
+                        error,
+                        interval[0],
+                        interval[2],
+                    )
+                for warning in uncertainty.warnings:
+                    log.info("%s bootstrap note: %s", name, warning)
 
     rs_background = res_rust.final_model.background.reshape(x_mesh.shape)
     rs_density = res_rust.final_model.prediction()

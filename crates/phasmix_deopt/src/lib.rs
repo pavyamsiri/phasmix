@@ -1,3 +1,5 @@
+extern crate alloc;
+
 use basin::CostFunction;
 #[cfg(test)]
 use core::convert;
@@ -46,6 +48,8 @@ pub enum DifferentialEvolutionError {
     EvaluationCountOverflow,
     /// No population member is available for selection.
     EmptyPopulation,
+    /// Warm start has the wrong length, non-finite values, or violates bounds.
+    InvalidWarmStart,
 }
 
 impl fmt::Display for DifferentialEvolutionError {
@@ -63,6 +67,9 @@ impl fmt::Display for DifferentialEvolutionError {
             }
             Self::InvalidTolerance => f.write_str("tolerances must be finite and nonnegative"),
             Self::EvaluationCountOverflow => f.write_str("function evaluation count exceeds u64"),
+            Self::InvalidWarmStart => {
+                f.write_str("warm start must match bounds and contain finite in-bounds values")
+            }
             Self::EmptyPopulation => f.write_str("cannot select from an empty population"),
         }
     }
@@ -237,8 +244,43 @@ impl DifferentialEvolution {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
+        self.minimize_with_warm_start(cost_func, bounds, None)
+    }
+
+    /// Append a warm start to the configured random population.
+    ///
+    /// # Errors
+    /// Returns an error for invalid warm starts, settings, or objective failures.
+    pub fn minimize_with_warm_start<C>(
+        &self,
+        cost_func: &C,
+        bounds: &[(f64, f64)],
+        warm_start: Option<&[f64]>,
+    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64>
+            + Clone
+            + fmt::Debug
+            + Sync
+            + Send
+            + basin::BoxConstraints,
+        C::Error: Send + fmt::Display,
+    {
         self.validate(cost_func, bounds)?;
-        let evaluations_per_generation = u64::try_from(self.pop_size)
+        if let Some(point) = warm_start
+            && (point.len() != bounds.len()
+                || !point
+                    .iter()
+                    .zip(bounds)
+                    .all(|(&value, &(lb, ub))| value.is_finite() && value >= lb && value <= ub))
+        {
+            return Err(DifferentialEvolutionError::InvalidWarmStart.into());
+        }
+        let population_size = self
+            .pop_size
+            .checked_add(usize::from(warm_start.is_some()))
+            .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+        let evaluations_per_generation = u64::try_from(population_size)
             .map_err(|_error| DifferentialEvolutionError::EvaluationCountOverflow)?;
         let mut nfev = evaluations_per_generation;
 
@@ -252,7 +294,7 @@ impl DifferentialEvolution {
                     .map_err(|_error| DifferentialEvolutionError::InvalidBound { index })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let initial_population = (0..self.pop_size)
+        let mut initial_population: Vec<Vec<f64>> = (0..self.pop_size)
             .map(|_| {
                 uniform_bounds
                     .iter()
@@ -260,6 +302,9 @@ impl DifferentialEvolution {
                     .collect()
             })
             .collect();
+        if let Some(point) = warm_start {
+            initial_population.push(point.to_vec());
+        }
         let mut population = Self::evaluate_population(cost_func, initial_population)?;
 
         let num_members = population.len();
@@ -397,5 +442,91 @@ mod tests {
         println!("cost = {}", res.cost);
         println!("params = {:?}", res.params);
         println!("nfev = {}", res.nfev);
+    }
+}
+
+#[cfg(test)]
+mod warm_start_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use core::convert::Infallible;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug)]
+    struct RecordingObjective {
+        lower: Vec<f64>,
+        upper: Vec<f64>,
+        evaluations: Arc<Mutex<Vec<Vec<f64>>>>,
+    }
+
+    impl CostFunction for RecordingObjective {
+        type Param = Vec<f64>;
+        type Output = f64;
+        type Error = Infallible;
+        fn cost(&self, param: &Vec<f64>) -> Result<f64, Self::Error> {
+            self.evaluations.lock().unwrap().push(param.clone());
+            Ok(param.iter().map(|value| (value - 0.123).powi(2)).sum())
+        }
+    }
+    impl basin::BoxConstraints for RecordingObjective {
+        fn lower(&self) -> &Vec<f64> {
+            &self.lower
+        }
+        fn upper(&self) -> &Vec<f64> {
+            &self.upper
+        }
+    }
+    fn objective() -> RecordingObjective {
+        RecordingObjective {
+            lower: vec![0.0],
+            upper: vec![1.0],
+            evaluations: Arc::default(),
+        }
+    }
+
+    #[test]
+    fn warm_start_adds_population_member_and_evaluation() {
+        let objective = objective();
+        let optimizer = DifferentialEvolution {
+            pop_size: 4,
+            max_iter: 1,
+            atol: 0.0,
+            rtol: 0.0,
+        };
+        let result = optimizer
+            .minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&[0.123]))
+            .unwrap();
+        let points = objective.evaluations.lock().unwrap().clone();
+        assert!(points[..5].contains(&vec![0.123]));
+        assert_eq!(result.nfev, u64::try_from(points.len()).unwrap());
+        assert_eq!(result.params, vec![0.123]);
+        assert!(points.len() >= 10);
+    }
+
+    #[test]
+    fn invalid_warm_starts_fail_before_evaluation() {
+        let objective = objective();
+        let optimizer = DifferentialEvolution {
+            pop_size: 4,
+            max_iter: 0,
+            atol: 0.0,
+            rtol: 0.0,
+        };
+        for point in [
+            vec![],
+            vec![0.0, 0.0],
+            vec![f64::NAN],
+            vec![f64::INFINITY],
+            vec![-0.1],
+            vec![1.1],
+        ] {
+            assert!(matches!(
+                optimizer.minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&point)),
+                Err(OptimizationError::DifferentialEvolution(
+                    DifferentialEvolutionError::InvalidWarmStart
+                ))
+            ));
+        }
+        assert!(objective.evaluations.lock().unwrap().is_empty());
     }
 }

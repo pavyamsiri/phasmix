@@ -153,6 +153,11 @@ class PythonFitBackend(FitBackend):
         self._bounds: ParameterBounds | Sequence[ParameterBounds] = bounds if bounds is not None else ParameterBounds()
         self._local_maxiter: int | None = None
 
+    @property
+    def local_optimizer_maxiter(self) -> int:
+        """Default iteration budget for local L-BFGS-B refits."""
+        return self._local_maxiter if self._local_maxiter is not None else 500
+
     def with_local_optimizer(self, *, maxiter: int) -> PythonFitBackend:
         """Copy this backend for bounded local refits without changing ordinary fits."""
         if type(maxiter) is not int or maxiter < 1:
@@ -187,6 +192,18 @@ class PythonFitBackend(FitBackend):
             raise ValueError(msg)
 
         return create_sigmoid_mask(1.0, 40.0)
+
+    def component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]:
+        """Return the bounds selected for the requested model size."""
+        return tuple(self._component_bounds(num_components))
+
+    def update_bounds(self, bounds: ParameterBounds | Sequence[ParameterBounds]) -> None:
+        """Validate and replace bounds for subsequent fits."""
+        candidate = bounds if isinstance(bounds, ParameterBounds) else tuple(bounds)
+        if not isinstance(candidate, ParameterBounds) and not candidate:
+            msg = "bounds must be a ParameterBounds or a nonempty sequence of ParameterBounds."
+            raise ValueError(msg)
+        self._bounds = candidate
 
     def _component_bounds(self, num_components: int) -> Sequence[ParameterBounds]:
         if num_components < 1:
@@ -403,7 +420,7 @@ class PythonFitBackend(FitBackend):
         self,
         objective_func: _ObjectiveFunc,
         *,
-        bounds: optimize.Bounds,
+        bounds: optimize.Bounds | None,
         rng: np.random.Generator,
         guess: onp.Array1D[np.float64] | None,
     ) -> OptimizationResult:
@@ -430,7 +447,7 @@ class PythonFitBackend(FitBackend):
         def objective(parameters: onp.Array1D[np.float64]) -> float:
             return float(objective_func(parameters))
 
-        if bounds.lb.size == 0:
+        if bounds is None or bounds.lb.size == 0:
             parameters = np.empty(0, dtype=np.float64)
             cost = objective(parameters)
             return OptimizationResult(
@@ -580,7 +597,7 @@ class PythonFitBackend(FitBackend):
         winding: Literal[-1, 1] | None = None,
     ) -> BackendResult:
         layout = ParameterLayout.from_bounds(self._component_bounds(num_components))
-        bounds = optimize.Bounds(lb=layout.lower, ub=layout.upper)
+        bounds = optimize.Bounds(lb=layout.lower, ub=layout.upper) if layout.num_free else None
         free_guess: onp.Array1D[np.float64] | None = layout.pack(guess) if guess is not None else None
 
         density_total = np.sum(density)

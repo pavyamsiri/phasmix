@@ -1,35 +1,40 @@
-"""Behavioral tests for the optional Python local-refit bootstrap."""
+"""Behavioral tests for the local-refit bootstrap."""
 
 # ruff: noqa: D103
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
 
 import numpy as np
 import pytest
-from scipy import optimize
-
 from phasmix import BootstrapSamples, bootstrap_uncertainty
 from phasmix.bounds import ParameterBounds
 from phasmix.fit import FitSuccess, PSpiralFitter
 from phasmix.model import PSpiralModel
 from phasmix.uncertainty import _aligned  # pyright: ignore[reportPrivateUsage] -- test periodic component alignment.
+from scipy import optimize
 
 if TYPE_CHECKING:
     from phasmix.fit import PSpiralFitResult
 
 
+@pytest.fixture(params=["python", "rust"])
+def backend_name(request: pytest.FixtureRequest) -> Literal["python", "rust"]:
+    assert request.param in ("python", "rust")
+    return request.param
+
+
 @pytest.fixture
-def fitted() -> tuple[PSpiralFitter, PSpiralFitResult]:
+def fitted(backend_name: Literal["python", "rust"]) -> tuple[PSpiralFitter, PSpiralFitResult]:
     parameters = np.array([[0.4, 0.05, 0.002, 0.3, 40.0, 0.09]])
     z, vz = np.meshgrid(np.linspace(-0.8, 0.8, 14), np.linspace(-35.0, 35.0, 15))
     background = 100 * np.exp(-np.square(z) - np.square(vz / 40))
     model = PSpiralModel(parameters, z, vz, background, winding=1)
     counts = np.random.default_rng(8).poisson(model.prediction()).astype(np.float64)
     bounds = ParameterBounds(alpha=(0.0, 0.9), b=0.05, c=0.002, theta0=0.3, scale_factor=40.0, rho=0.09)
-    fitter = PSpiralFitter(bounds=bounds)
+    fitter = PSpiralFitter(backend=backend_name, bounds=bounds)
     outcome = fitter.fit_spiral_with_background(
         counts, background, z, vz, num_components=1, winding=1, improve_background=False, rng=np.random.default_rng(9)
     )
@@ -45,6 +50,7 @@ def test_count_bootstrap_is_local_reproducible_and_nonmutating(fitted: tuple[PSp
         serial = bootstrap_uncertainty(fitter, result, n_resamples=8, seed=12)
         parallel = bootstrap_uncertainty(fitter, result, n_resamples=10, seed=12, workers=2)
     assert serial.n_successful == 8
+    assert serial.maxiter == (1500 if "Nelder-Mead" in serial.replicates[0].diagnostics.message else 500)
     np.testing.assert_array_equal(serial.parameters, parallel.parameters[:8])
     np.testing.assert_array_equal(result.final_model.parameters, original)
     np.testing.assert_array_equal(result.final_model.background, background)
@@ -68,13 +74,13 @@ def test_failed_local_refits_are_retained(fitted: tuple[PSpiralFitter, PSpiralFi
     assert any("failed" in warning for warning in uncertainty.warnings)
 
 
-def test_sample_bootstrap_rebuilds_background_and_replays_refinement() -> None:
+def test_sample_bootstrap_rebuilds_background_and_replays_refinement(backend_name: Literal["python", "rust"]) -> None:
     rng = np.random.default_rng(3)
     z = rng.normal(0, 0.4, 120)
     vz = rng.normal(0, 18, 120)
     z_bins, vz_bins = np.linspace(-1, 1, 8), np.linspace(-50, 50, 9)
     bounds = ParameterBounds(alpha=0.4, b=0.05, c=0.002, theta0=0.0, scale_factor=40.0, rho=0.09)
-    fitter = PSpiralFitter(bounds=bounds, max_iterations=1)
+    fitter = PSpiralFitter(backend=backend_name, bounds=bounds, max_iterations=1)
     outcome = fitter.fit_spiral(z, vz, z_bins, vz_bins, num_components=1, winding=1)
     assert isinstance(outcome, FitSuccess)
     from phasmix import fit  # noqa: PLC0415 -- wrap the real preprocessing implementation.
@@ -117,12 +123,6 @@ def test_one_draw_has_no_covariance(fitted: tuple[PSpiralFitter, PSpiralFitResul
     summary = bootstrap_uncertainty(fitter, result, n_resamples=1)
     assert summary.n_successful == 1
     assert np.all(np.isnan(summary.covariance))
-
-
-def test_rust_backend_is_rejected(fitted: tuple[PSpiralFitter, PSpiralFitResult]) -> None:
-    _, result = fitted
-    with pytest.raises(NotImplementedError, match="Python backend"):
-        bootstrap_uncertainty(PSpiralFitter(backend="rust"), result, n_resamples=2)
 
 
 @pytest.mark.parametrize("n_resamples", [0, -1])
@@ -187,3 +187,35 @@ def test_sample_refinement_uses_local_optimizer_for_every_update() -> None:
         )
     assert summary.n_successful == 3
     assert local.call_count == 6  # One initial fit and one refinement per draw.
+
+
+def test_rust_two_component_bootstrap_centers_each_phase_independently() -> None:
+    parameters = np.array([[0.2, 0.04, 0.001, 3.1, 40.0, 0.08], [0.6, 0.07, 0.003, -2.8, 50.0, 0.12]])
+    z, vz = np.meshgrid(np.linspace(-0.8, 0.8, 14), np.linspace(-35.0, 35.0, 15))
+    background = 100 * np.exp(-np.square(z) - np.square(vz / 40))
+    model = PSpiralModel(parameters, z, vz, background, winding=1)
+    counts = np.random.default_rng(48).poisson(model.prediction()).astype(np.float64)
+    bounds = tuple(
+        ParameterBounds(alpha=float(row[0]), b=float(row[1]), c=float(row[2]), scale_factor=float(row[4]), rho=float(row[5]))
+        for row in parameters
+    )
+    fitter = PSpiralFitter(backend="rust", optimizer="nelder_mead", bounds=bounds, nelder_mead_maxiter=500)
+    outcome = fitter.fit_spiral_with_background(
+        counts, background, z, vz, num_components=2, winding=1, improve_background=False, warm_start=parameters.flatten()
+    )
+    assert isinstance(outcome, FitSuccess)
+    assert outcome.diagnostics.success
+    original = outcome.result.final_model.parameters.copy()
+    serial = bootstrap_uncertainty(fitter, outcome.result, n_resamples=3, seed=32)
+    parallel = bootstrap_uncertainty(fitter, outcome.result, n_resamples=4, seed=32, workers=2)
+    assert serial.n_successful == 3
+    np.testing.assert_array_equal(serial.parameters, parallel.parameters[:3])
+    fixed_indices = [0, 1, 2, 4, 5, 6, 7, 8, 10, 11]
+    np.testing.assert_array_equal(serial.parameters[:, fixed_indices], np.tile(original.flatten()[fixed_indices], (3, 1)))
+    np.testing.assert_array_equal(outcome.result.final_model.parameters, original)
+    # Bootstrap must update only its local copy; these phases use the original bounds.
+    repeated = fitter.fit_spiral_with_background(
+        counts, background, z, vz, num_components=2, winding=1, improve_background=False, warm_start=parameters.flatten()
+    )
+    assert isinstance(repeated, FitSuccess)
+    np.testing.assert_array_equal(repeated.result.final_model.parameters, original)

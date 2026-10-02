@@ -1,4 +1,4 @@
-"""Experimental Python bootstrap uncertainty with bounded local refits.
+"""Experimental bootstrap uncertainty with bounded local refits.
 
 Results condition on the selected winding, component count, and local solution.
 Use the original fitter configuration; fitted results do not retain its provenance.
@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from ._backends import FitFailure, FitTerminationReason, OptimizationDiagnostics
-from ._python_backend import PythonFitBackend
 from .bounds import Interval, ParameterBounds
 from .param_layout import ParameterLayout
 
@@ -154,29 +153,31 @@ def bootstrap_uncertainty(
     confidence_level: float = 0.95,
     seed: int = 0,
     workers: int = 1,
-    maxiter: int = 500,
+    maxiter: int | None = None,
 ) -> BootstrapResult:
-    """Bootstrap an existing fit using its original Python fitter configuration.
+    """Bootstrap an existing fit using its original fitter configuration.
 
     With ``samples``, resample paired stars and rebuild their KDE, then repeat
     the specified refinement policy. Without samples, simulate multinomial
     counts from the fitted prediction and hold its background shape fixed.
     Winding and component count remain fixed in both cases.
 
-    Each replicate starts at the original estimate and uses scaled L-BFGS-B.
+    Each replicate starts at the original estimate using a bounded local optimizer:
+    scaled L-BFGS-B for Python or scaled Nelder-Mead for Rust. ``maxiter=None``
+    uses the backend budget: 500 for Python, or ``nelder_mead_maxiter`` for Rust
+    (1500 by default). An explicit ``maxiter`` overrides that budget.
     No global searches or retries are performed in this experimental version.
     Failed/nonconverged draws remain in the result and are excluded from its
     explicitly qualified summaries. The original fitter and fit are unchanged.
 
     Custom callbacks must be thread-safe for ``workers > 1``. Reusing ``seed``
     preserves each draw when increasing ``n_resamples`` or changing worker count.
-    Only the Python backend is supported. Callers must supply the same bounds,
+    Both Python and Rust backends are supported. Callers must supply the same bounds,
     mask, smoothing, and refinement configuration used for the original fit.
     """
     backend = fitter._backend  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
-    if not isinstance(backend, PythonFitBackend):
-        msg = "Bootstrap uncertainty currently supports only the Python backend."
-        raise NotImplementedError(msg)
+    if maxiter is None:
+        maxiter = backend.local_optimizer_maxiter
     for name, value in (("n_resamples", n_resamples), ("workers", workers), ("maxiter", maxiter)):
         if type(value) is not int or value < 1:
             msg = f"{name} must be a positive integer."
@@ -190,14 +191,14 @@ def bootstrap_uncertainty(
 
     model = result.final_model
     reference = model.parameters.flatten().copy()
-    original_bounds = backend._component_bounds(model.num_components)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
+    original_bounds = backend.component_bounds(model.num_components)
     layout = ParameterLayout.from_bounds(original_bounds)
     if not np.allclose(layout.unpack(layout.pack(reference)), reference, rtol=1e-10, atol=1e-10):
         msg = "The fitter bounds are incompatible with the reference parameters."
         raise ValueError(msg)
     local_backend = backend.with_local_optimizer(maxiter=maxiter)
-    local_backend._bounds = tuple(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- isolated copy.
-        _local_bounds(bound, float(reference[6 * i + 3])) for i, bound in enumerate(original_bounds)
+    local_backend.update_bounds(
+        tuple(_local_bounds(bound, float(reference[6 * i + 3])) for i, bound in enumerate(original_bounds))
     )
     local_fitter = copy(fitter)
     local_fitter._backend = local_backend  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
@@ -321,12 +322,12 @@ def _summarize(
     if any(item.reason == FitTerminationReason.ITERATION_LIMIT for item in replicates):
         warnings.append("Some replicates reached the background refinement limit.")
     covariance = np.full((reference.size, reference.size), np.nan)
-    intervals = np.full((reference.size, 2), np.nan)
+    intervals = np.full((reference.size, 3), np.nan)
     bias = np.full(reference.size, np.nan)
     if len(accepted) >= 2:
         covariance = np.asarray(np.cov(accepted, rowvar=False, ddof=1))
         tail = (1 - confidence_level) / 2
-        intervals = np.quantile(accepted, [tail, 1 - tail], axis=0).T
+        intervals = np.quantile(accepted, [tail, 0.5, 1 - tail], axis=0).T
         bias = accepted.mean(axis=0) - reference
         fixed = np.ones(reference.size, dtype=np.bool_)
         fixed[layout.free_indices] = False

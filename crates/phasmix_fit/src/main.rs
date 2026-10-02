@@ -53,6 +53,8 @@ fn main() {
         phasmix_tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let fitter = PSpiralFitter {
         fitter_single: PSpiralFitterND {
+            warm_start: None,
+            parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(tiktak1d),
             alpha_bounds: (0.0, 1.0),
             b_bounds: (0.005, 0.1),
@@ -62,6 +64,8 @@ fn main() {
             rho_bounds: (0.0, 0.18),
         },
         fitter_double: PSpiralFitterND {
+            warm_start: None,
+            parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(tiktak2d),
             alpha_bounds: (0.0, 1.0),
             b_bounds: (0.005, 0.1),

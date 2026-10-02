@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod nelder_mead;
 pub mod parameter_layout;
 
 pub use parameter_layout::{LayoutError, ParameterBound, ParameterLayout};
@@ -228,6 +229,8 @@ mod tests {
         // Fixed zero amplitude makes every prediction equal its background.
         // Exercise the real optimizer without depending on parameter recovery.
         PSpiralFitterND {
+            warm_start: None,
+            parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: (0.0, 0.0),
             b_bounds: (0.05, 0.05),
@@ -272,6 +275,8 @@ mod tests {
         }
         assert_eq!(single.num_free_parameters(), 6);
         double = PSpiralFitterND {
+            warm_start: None,
+            parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: single.alpha_bounds,
             b_bounds: single.b_bounds,
@@ -328,6 +333,41 @@ mod tests {
                 (score - recomputed).abs() < 1e-12,
                 "stored {score}, recomputed {recomputed}"
             );
+        }
+    }
+
+    #[test]
+    fn refinement_reuses_best_model_as_warm_start() {
+        let data = [1.0, 3.0, 2.0, 4.0, 2.0, 3.0];
+        let background = [2.5; 6];
+        let coordinates = [0.1; 6];
+        let mask = [1.0; 6];
+        let fitter = refinement_fitter(2, 0.0, 0.0);
+        for count in [1, 2] {
+            let mut iter = fitter.fit_spiral_with_background_iterative(
+                &data,
+                &background,
+                &mask,
+                &coordinates,
+                &coordinates,
+                (2, 3),
+                Some(count),
+                Some(Winding::Positive),
+                true,
+            );
+            assert!(iter.next().is_some());
+            assert!(iter.next().is_some());
+            let warm_start = if count == 1 {
+                &iter.fitter.fitter_single.warm_start
+            } else {
+                &iter.fitter.fitter_double.warm_start
+            };
+            let expected: Vec<_> = [0.0, 0.05, 0.002, 0.0, 40.0, 0.09]
+                .into_iter()
+                .cycle()
+                .take(6 * count)
+                .collect();
+            assert_eq!(warm_start.as_ref(), Some(&expected));
         }
     }
 
@@ -451,7 +491,7 @@ mod tests {
             assert_consistent_result(&result, &coordinates, &mask);
             assert_eq!(&*result.final_background, &background);
             assert_eq!(result.final_lnl, result.initial_lnl);
-            assert_eq!(result.num_iterations, 1);
+            assert_eq!(result.num_iterations, 0);
             assert!(result.converged);
             assert!(iter.next().is_none());
         }
@@ -743,18 +783,57 @@ pub fn fit_with_parameter_layout(
     (PSpiralModel { components }, -cost)
 }
 
-/// Select the global optimizer used by a fixed-dimensional spiral fitter.
-/// Both optimizers finish with projected Nelder–Mead refinement.
+/// Diagnostics for a model optimization attempt.
+#[derive(Clone, Debug)]
+pub struct OptimizerDiagnostics {
+    /// Whether the optimizer converged to a finite objective value.
+    pub success: bool,
+    /// Objective evaluations, including rejected attempts.
+    pub nfev: u64,
+    /// Solver iterations.
+    pub nit: u64,
+    /// Solver termination description.
+    pub message: String,
+}
+
+pub(crate) struct FitOptimizationResult {
+    pub params: Vec<f64>,
+    pub cost: f64,
+    pub diagnostics: OptimizerDiagnostics,
+}
+
+impl FitOptimizationResult {
+    fn from_global(result: phasmix_tiktak::OptimizationResult) -> Self {
+        Self {
+            params: result.params,
+            cost: result.cost,
+            diagnostics: OptimizerDiagnostics {
+                success: result.cost.is_finite(),
+                nfev: result.nfev,
+                nit: 0,
+                message: "Global search and Nelder-Mead refinement completed".into(),
+            },
+        }
+    }
+}
+
+/// Select the optimizer used by a fixed-dimensional spiral fitter.
+/// Global optimizers finish with projected Nelder–Mead refinement.
 pub enum GlobalOptimizer<const N: usize> {
     /// Sobol exploration followed by local restarts.
     TikTak(TikTak<N>),
     /// Differential evolution with deferred, parallel population evaluations.
     DifferentialEvolution(phasmix_deopt::DifferentialEvolution),
+    /// One bounded local search from a required warm start.
+    NelderMead { max_iter: usize },
 }
 
 impl<const N: usize> Clone for GlobalOptimizer<N> {
     fn clone(&self) -> Self {
         match self {
+            Self::NelderMead { max_iter } => Self::NelderMead {
+                max_iter: *max_iter,
+            },
             Self::TikTak(optimizer) => Self::TikTak(TikTak {
                 num_samples: optimizer.num_samples,
                 num_star: optimizer.num_star,
@@ -785,7 +864,8 @@ impl<const N: usize> GlobalOptimizer<N> {
         &self,
         objective: &C,
         bounds: &[(f64, f64)],
-    ) -> Result<phasmix_tiktak::OptimizationResult, phasmix_deopt::OptimizationError<C::Error>>
+        warm_start: Option<&[f64]>,
+    ) -> Result<FitOptimizationResult, phasmix_deopt::OptimizationError<C::Error>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
             + Clone
@@ -796,19 +876,34 @@ impl<const N: usize> GlobalOptimizer<N> {
         C::Error: Send + fmt::Display,
     {
         match self {
+            Self::NelderMead { max_iter } => {
+                nelder_mead::minimize(objective, bounds, warm_start, *max_iter)
+            }
             Self::TikTak(optimizer) => optimizer
-                .minimize(objective, bounds)
+                .minimize_with_warm_start(objective, bounds, warm_start)
+                .map(FitOptimizationResult::from_global)
                 .map_err(phasmix_deopt::OptimizationError::CostFunction),
             Self::DifferentialEvolution(optimizer) => {
-                let result = optimizer.minimize(objective, bounds)?;
-                Ok(phasmix_tiktak::OptimizationResult {
-                    params: result.params,
-                    cost: result.cost,
-                    nfev: result.nfev,
-                })
+                let result = optimizer.minimize_with_warm_start(objective, bounds, warm_start)?;
+                Ok(FitOptimizationResult::from_global(
+                    phasmix_tiktak::OptimizationResult {
+                        params: result.params,
+                        cost: result.cost,
+                        nfev: result.nfev,
+                    },
+                ))
             }
         }
     }
+}
+
+const fn combined_winding_diagnostics(
+    mut selected: OptimizerDiagnostics,
+    other: &OptimizerDiagnostics,
+) -> OptimizerDiagnostics {
+    selected.nfev += other.nfev;
+    selected.nit += other.nit;
+    selected
 }
 
 /// A fitter for phase spiral models with a fixed number of parameters.
@@ -818,6 +913,10 @@ impl<const N: usize> GlobalOptimizer<N> {
 pub struct PSpiralFitterND<const N: usize> {
     /// The global optimization engine.
     pub optimizer: GlobalOptimizer<N>,
+    /// Optional full parameter vector appended to the optimizer population.
+    pub warm_start: Option<Vec<f64>>,
+    /// Optional full bounds, allowing each component to have distinct constraints.
+    pub parameter_bounds: Option<Vec<(f64, f64)>>,
     /// The bounds for `alpha`.
     pub alpha_bounds: (f64, f64),
     /// The bounds for `b`.
@@ -836,6 +935,8 @@ impl<const N: usize> Clone for PSpiralFitterND<N> {
     fn clone(&self) -> Self {
         Self {
             optimizer: self.optimizer.clone(),
+            warm_start: self.warm_start.clone(),
+            parameter_bounds: self.parameter_bounds.clone(),
             alpha_bounds: self.alpha_bounds,
             b_bounds: self.b_bounds,
             c_bounds: self.c_bounds,
@@ -850,27 +951,86 @@ type OneArmFitter = PSpiralFitterND<6>;
 type TwoArmFitter = PSpiralFitterND<12>;
 
 impl<const N: usize> PSpiralFitterND<N> {
-    /// Count free parameters using the bounds repeated for each fitted arm.
-    fn num_free_parameters(&self) -> usize {
-        let bounds: Vec<_> = [
-            self.alpha_bounds,
-            self.b_bounds,
-            self.c_bounds,
-            self.theta0_bounds,
-            self.scale_factor_bounds,
-            self.rho_bounds,
-        ]
-        .into_iter()
-        .cycle()
-        .take(N)
-        .map(|(lower, upper)| {
-            if lower == upper {
-                ParameterBound::Fixed(lower)
-            } else {
-                ParameterBound::Interval { lower, upper }
-            }
+    fn bounds(&self) -> Vec<(f64, f64)> {
+        self.parameter_bounds.clone().unwrap_or_else(|| {
+            [
+                self.alpha_bounds,
+                self.b_bounds,
+                self.c_bounds,
+                self.theta0_bounds,
+                self.scale_factor_bounds,
+                self.rho_bounds,
+            ]
+            .into_iter()
+            .cycle()
+            .take(N)
+            .collect()
         })
-        .collect();
+    }
+
+    /// Replace all model bounds after validation.
+    ///
+    /// # Errors
+    /// Returns an error for an incorrect length or non-finite/reversed bounds.
+    pub fn update_bounds(&mut self, bounds: Vec<(f64, f64)>) -> Result<(), LayoutError> {
+        if bounds.len() != N {
+            return Err(LayoutError::WrongLength {
+                expected: N,
+                actual: bounds.len(),
+            });
+        }
+        let layout_bounds: Vec<_> = bounds
+            .iter()
+            .map(|&(lower, upper)| ParameterBound::Interval { lower, upper })
+            .collect();
+        ParameterLayout::from_bounds(&layout_bounds)?;
+        self.parameter_bounds = Some(bounds);
+        self.warm_start = None;
+        Ok(())
+    }
+
+    /// Set a full parameter vector to append to every global search.
+    ///
+    /// # Errors
+    /// Returns an error for incorrect length, non-finite values, fixed-value
+    /// mismatches, or values outside the configured bounds.
+    #[expect(
+        clippy::float_cmp,
+        reason = "Equal endpoints encode fixed parameters exactly"
+    )]
+    pub fn set_warm_start(&mut self, warm_start: Option<Vec<f64>>) -> Result<(), LayoutError> {
+        if let Some(point) = &warm_start {
+            let bounds: Vec<_> = self
+                .bounds()
+                .into_iter()
+                .map(|(lower, upper)| {
+                    if lower == upper {
+                        ParameterBound::Fixed(lower)
+                    } else {
+                        ParameterBound::Interval { lower, upper }
+                    }
+                })
+                .collect();
+            let layout = ParameterLayout::from_bounds(&bounds)?;
+            layout.unpack(&layout.pack(point)?)?;
+        }
+        self.warm_start = warm_start;
+        Ok(())
+    }
+
+    /// Count free parameters using the configured full model bounds.
+    fn num_free_parameters(&self) -> usize {
+        let bounds: Vec<_> = self
+            .bounds()
+            .into_iter()
+            .map(|(lower, upper)| {
+                if lower == upper {
+                    ParameterBound::Fixed(lower)
+                } else {
+                    ParameterBound::Interval { lower, upper }
+                }
+            })
+            .collect();
         ParameterLayout::from_bounds(&bounds)
             .expect("fitter bounds must be finite and ordered")
             .free_len()
@@ -923,6 +1083,10 @@ pub struct PSpiralFitResult {
     pub nfev: u64,
     /// Number of background refinement attempts performed.
     pub nit: u64,
+    /// Whether all model optimization attempts converged.
+    pub optimizer_success: bool,
+    /// Termination description for the latest unsuccessful attempt, or latest attempt.
+    pub optimizer_message: String,
     /// Whether this checkpoint is terminal.
     pub terminal: bool,
 }
@@ -979,26 +1143,47 @@ pub struct PSpiralFitterIterative {
     pub is_finished: bool,
     /// Total objective evaluations across optimization attempts.
     pub total_nfev: u64,
+    /// Accumulated diagnostics across model optimization attempts.
+    pub optimizer_diagnostics: OptimizerDiagnostics,
 }
 
 impl PSpiralFitterIterative {
     /// Optimize the current background and preserve the selected winding.
-    fn optimize_model(&mut self) -> (PSpiralModel, f64, u64) {
+    fn optimize_model(&mut self) -> (PSpiralModel, f64, OptimizerDiagnostics) {
+        if let Some(model) = &self.best_model {
+            let params = model
+                .components
+                .iter()
+                .flat_map(|component| {
+                    [
+                        component.alpha,
+                        component.b_winding,
+                        component.c_winding,
+                        component.theta0,
+                        component.scale_factor,
+                        component.rho,
+                    ]
+                })
+                .collect();
+            match self.num_components {
+                1 => self.fitter.fitter_single.warm_start = Some(params),
+                2 => self.fitter.fitter_double.warm_start = Some(params),
+                _ => unreachable!(),
+            }
+        }
         match self.num_components {
             1 => {
-                let (component, quality, nfev) = if let Some(winding) = self.best_winding {
-                    self.fitter
-                        .fitter_single
-                        .fit_spiral_with_background_with_winding(
-                            &self.initial_density,
-                            &self.current_background,
-                            &self.mask,
-                            &self.mesh_x,
-                            &self.mesh_y,
-                            winding,
-                        )
+                let (component, quality, diagnostics) = if let Some(winding) = self.best_winding {
+                    self.fitter.fitter_single.fit_with_winding_diagnostics(
+                        &self.initial_density,
+                        &self.current_background,
+                        &self.mask,
+                        &self.mesh_x,
+                        &self.mesh_y,
+                        winding,
+                    )
                 } else {
-                    let result = self.fitter.fitter_single.fit_spiral_with_background(
+                    let result = self.fitter.fitter_single.fit_with_diagnostics(
                         &self.initial_density,
                         &self.current_background,
                         &self.mask,
@@ -1013,23 +1198,22 @@ impl PSpiralFitterIterative {
                         components: vec![component],
                     },
                     quality,
-                    nfev,
+                    diagnostics,
                 )
             }
             2 => {
-                let (first, second, quality, nfev) = if let Some(winding) = self.best_winding {
-                    self.fitter
-                        .fitter_double
-                        .fit_spiral_with_background_with_winding(
-                            &self.initial_density,
-                            &self.current_background,
-                            &self.mask,
-                            &self.mesh_x,
-                            &self.mesh_y,
-                            winding,
-                        )
+                let (first, second, quality, diagnostics) = if let Some(winding) = self.best_winding
+                {
+                    self.fitter.fitter_double.fit_with_winding_diagnostics(
+                        &self.initial_density,
+                        &self.current_background,
+                        &self.mask,
+                        &self.mesh_x,
+                        &self.mesh_y,
+                        winding,
+                    )
                 } else {
-                    let result = self.fitter.fitter_double.fit_spiral_with_background(
+                    let result = self.fitter.fitter_double.fit_with_diagnostics(
                         &self.initial_density,
                         &self.current_background,
                         &self.mask,
@@ -1044,7 +1228,7 @@ impl PSpiralFitterIterative {
                         components: vec![first, second],
                     },
                     quality,
-                    nfev,
+                    diagnostics,
                 )
             }
             _ => panic!("Unsupported `num_components`"),
@@ -1109,7 +1293,9 @@ impl PSpiralFitterIterative {
             initial_lnl: self.initial_quality,
             final_lnl: self.best_quality,
             nfev: self.total_nfev,
-            nit: self.iteration_index as u64,
+            nit: self.optimizer_diagnostics.nit,
+            optimizer_success: self.optimizer_diagnostics.success,
+            optimizer_message: self.optimizer_diagnostics.message.clone(),
             terminal: self.is_finished,
         }
     }
@@ -1132,14 +1318,26 @@ impl Iterator for PSpiralFitterIterative {
             return None;
         }
 
-        let (current_model, ll, nfev) = self.optimize_model();
-        self.total_nfev += nfev;
+        let (current_model, ll, diagnostics) = self.optimize_model();
+        self.total_nfev += diagnostics.nfev;
+        self.optimizer_diagnostics.nfev += diagnostics.nfev;
+        self.optimizer_diagnostics.nit += diagnostics.nit;
+        self.optimizer_diagnostics.success &= diagnostics.success;
+        self.optimizer_diagnostics.message = diagnostics.message;
 
         // Set initial model if this is the first iteration.
         if self.initial_model.is_none() {
             self.initial_model = Some(current_model.clone());
             self.best_quality = ll;
             self.initial_quality = ll;
+        }
+
+        if !self.optimizer_diagnostics.success {
+            if self.best_model.is_none() {
+                self.best_model = Some(current_model);
+            }
+            self.is_finished = true;
+            return Some(self.snapshot());
         }
 
         // If we aren't performing background refinement then we return here.
@@ -1279,6 +1477,12 @@ impl PSpiralFitter {
             improve_background,
             is_finished: false,
             total_nfev: 0,
+            optimizer_diagnostics: OptimizerDiagnostics {
+                success: true,
+                nfev: 0,
+                nit: 0,
+                message: String::new(),
+            },
         }
     }
 
@@ -1324,7 +1528,20 @@ impl PSpiralFitterND<6> {
         mesh_x: &[f64],
         mesh_y: &[f64],
     ) -> (PSpiralComponent, f64, u64) {
-        let pos_winding = self.fit_spiral_with_background_with_winding(
+        let (component, quality, diagnostics) =
+            self.fit_with_diagnostics(initial_density, initial_background, mask, mesh_x, mesh_y);
+        (component, quality, diagnostics.nfev)
+    }
+
+    fn fit_with_diagnostics(
+        &self,
+        initial_density: &[f64],
+        initial_background: &[f64],
+        mask: &[f64],
+        mesh_x: &[f64],
+        mesh_y: &[f64],
+    ) -> (PSpiralComponent, f64, OptimizerDiagnostics) {
+        let pos_winding = self.fit_with_winding_diagnostics(
             initial_density,
             initial_background,
             mask,
@@ -1332,7 +1549,7 @@ impl PSpiralFitterND<6> {
             mesh_y,
             Winding::Positive,
         );
-        let neg_winding = self.fit_spiral_with_background_with_winding(
+        let neg_winding = self.fit_with_winding_diagnostics(
             initial_density,
             initial_background,
             mask,
@@ -1342,9 +1559,17 @@ impl PSpiralFitterND<6> {
         );
 
         if pos_winding.1 >= neg_winding.1 {
-            (pos_winding.0, pos_winding.1, pos_winding.2 + neg_winding.2)
+            (
+                pos_winding.0,
+                pos_winding.1,
+                combined_winding_diagnostics(pos_winding.2, &neg_winding.2),
+            )
         } else {
-            (neg_winding.0, neg_winding.1, pos_winding.2 + neg_winding.2)
+            (
+                neg_winding.0,
+                neg_winding.1,
+                combined_winding_diagnostics(neg_winding.2, &pos_winding.2),
+            )
         }
     }
 
@@ -1359,22 +1584,29 @@ impl PSpiralFitterND<6> {
         mesh_y: &[f64],
         winding: Winding,
     ) -> (PSpiralComponent, f64, u64) {
-        let lb = vec![
-            self.alpha_bounds.0,
-            self.b_bounds.0,
-            self.c_bounds.0,
-            self.theta0_bounds.0,
-            self.scale_factor_bounds.0,
-            self.rho_bounds.0,
-        ];
-        let ub = vec![
-            self.alpha_bounds.1,
-            self.b_bounds.1,
-            self.c_bounds.1,
-            self.theta0_bounds.1,
-            self.scale_factor_bounds.1,
-            self.rho_bounds.1,
-        ];
+        let (component, quality, diagnostics) = self.fit_with_winding_diagnostics(
+            initial_density,
+            initial_background,
+            mask,
+            mesh_x,
+            mesh_y,
+            winding,
+        );
+        (component, quality, diagnostics.nfev)
+    }
+
+    fn fit_with_winding_diagnostics(
+        &self,
+        initial_density: &[f64],
+        initial_background: &[f64],
+        mask: &[f64],
+        mesh_x: &[f64],
+        mesh_y: &[f64],
+        winding: Winding,
+    ) -> (PSpiralComponent, f64, OptimizerDiagnostics) {
+        let bounds = self.bounds();
+        let lb: Vec<_> = bounds.iter().map(|bound| bound.0).collect();
+        let ub: Vec<_> = bounds.iter().map(|bound| bound.1).collect();
         let res = self
             .optimizer
             .minimize(
@@ -1388,14 +1620,8 @@ impl PSpiralFitterND<6> {
                     lb: &lb,
                     ub: &ub,
                 },
-                &[
-                    self.alpha_bounds,
-                    self.b_bounds,
-                    self.c_bounds,
-                    self.theta0_bounds,
-                    self.scale_factor_bounds,
-                    self.rho_bounds,
-                ],
+                &bounds,
+                self.warm_start.as_deref(),
             )
             .expect("phase spiral optimization failed");
 
@@ -1410,7 +1636,7 @@ impl PSpiralFitterND<6> {
             flattening_strength: 0.1,
         };
 
-        (best_model, -res.cost, res.nfev)
+        (best_model, -res.cost, res.diagnostics)
     }
 }
 
@@ -1425,7 +1651,25 @@ impl PSpiralFitterND<12> {
         mesh_x: &[f64],
         mesh_y: &[f64],
     ) -> (PSpiralComponent, PSpiralComponent, f64, u64) {
-        let pos_winding = self.fit_spiral_with_background_with_winding(
+        let (first, second, quality, diagnostics) =
+            self.fit_with_diagnostics(initial_density, initial_background, mask, mesh_x, mesh_y);
+        (first, second, quality, diagnostics.nfev)
+    }
+
+    fn fit_with_diagnostics(
+        &self,
+        initial_density: &[f64],
+        initial_background: &[f64],
+        mask: &[f64],
+        mesh_x: &[f64],
+        mesh_y: &[f64],
+    ) -> (
+        PSpiralComponent,
+        PSpiralComponent,
+        f64,
+        OptimizerDiagnostics,
+    ) {
+        let pos_winding = self.fit_with_winding_diagnostics(
             initial_density,
             initial_background,
             mask,
@@ -1433,7 +1677,7 @@ impl PSpiralFitterND<12> {
             mesh_y,
             Winding::Positive,
         );
-        let neg_winding = self.fit_spiral_with_background_with_winding(
+        let neg_winding = self.fit_with_winding_diagnostics(
             initial_density,
             initial_background,
             mask,
@@ -1447,14 +1691,14 @@ impl PSpiralFitterND<12> {
                 pos_winding.0,
                 pos_winding.1,
                 pos_winding.2,
-                pos_winding.3 + neg_winding.3,
+                combined_winding_diagnostics(pos_winding.3, &neg_winding.3),
             )
         } else {
             (
                 neg_winding.0,
                 neg_winding.1,
                 neg_winding.2,
-                pos_winding.3 + neg_winding.3,
+                combined_winding_diagnostics(neg_winding.3, &pos_winding.3),
             )
         }
     }
@@ -1470,34 +1714,34 @@ impl PSpiralFitterND<12> {
         mesh_y: &[f64],
         winding: Winding,
     ) -> (PSpiralComponent, PSpiralComponent, f64, u64) {
-        let lb = vec![
-            self.alpha_bounds.0,
-            self.b_bounds.0,
-            self.c_bounds.0,
-            self.theta0_bounds.0,
-            self.scale_factor_bounds.0,
-            self.rho_bounds.0,
-            self.alpha_bounds.0,
-            self.b_bounds.0,
-            self.c_bounds.0,
-            self.theta0_bounds.0,
-            self.scale_factor_bounds.0,
-            self.rho_bounds.0,
-        ];
-        let ub = vec![
-            self.alpha_bounds.1,
-            self.b_bounds.1,
-            self.c_bounds.1,
-            self.theta0_bounds.1,
-            self.scale_factor_bounds.1,
-            self.rho_bounds.1,
-            self.alpha_bounds.1,
-            self.b_bounds.1,
-            self.c_bounds.1,
-            self.theta0_bounds.1,
-            self.scale_factor_bounds.1,
-            self.rho_bounds.1,
-        ];
+        let (first, second, quality, diagnostics) = self.fit_with_winding_diagnostics(
+            initial_density,
+            initial_background,
+            mask,
+            mesh_x,
+            mesh_y,
+            winding,
+        );
+        (first, second, quality, diagnostics.nfev)
+    }
+
+    fn fit_with_winding_diagnostics(
+        &self,
+        initial_density: &[f64],
+        initial_background: &[f64],
+        mask: &[f64],
+        mesh_x: &[f64],
+        mesh_y: &[f64],
+        winding: Winding,
+    ) -> (
+        PSpiralComponent,
+        PSpiralComponent,
+        f64,
+        OptimizerDiagnostics,
+    ) {
+        let bounds = self.bounds();
+        let lb: Vec<_> = bounds.iter().map(|bound| bound.0).collect();
+        let ub: Vec<_> = bounds.iter().map(|bound| bound.1).collect();
         let res = self
             .optimizer
             .minimize(
@@ -1511,20 +1755,8 @@ impl PSpiralFitterND<12> {
                     lb: &lb,
                     ub: &ub,
                 },
-                &[
-                    self.alpha_bounds,
-                    self.b_bounds,
-                    self.c_bounds,
-                    self.theta0_bounds,
-                    self.scale_factor_bounds,
-                    self.rho_bounds,
-                    self.alpha_bounds,
-                    self.b_bounds,
-                    self.c_bounds,
-                    self.theta0_bounds,
-                    self.scale_factor_bounds,
-                    self.rho_bounds,
-                ],
+                &bounds,
+                self.warm_start.as_deref(),
             )
             .expect("phase spiral optimization failed");
 
@@ -1549,7 +1781,7 @@ impl PSpiralFitterND<12> {
             flattening_strength: 0.1,
         };
 
-        (comp1, comp2, -res.cost, res.nfev)
+        (comp1, comp2, -res.cost, res.diagnostics)
     }
 }
 

@@ -52,7 +52,10 @@ class PSpiralFitter:
         bounds: Sequence[Sequence[tuple[float, float]]] | None = None,
         *,
         optimizer: str = "tiktak",
+        nelder_mead_maxiter: int = 1500,
     ) -> None: ...
+    def update_bounds(self, bounds: Sequence[Sequence[tuple[float, float]]]) -> None: ...
+    def with_local_optimizer(self, *, maxiter: int = 1500) -> PSpiralFitter: ...
     def fit_batch(
         self,
         inputs: Sequence[
@@ -68,6 +71,7 @@ class PSpiralFitter:
         *,
         workers: int | None = None,
         options: Sequence[tuple[int | None, int | None, bool]] | None = None,
+        warm_starts: Sequence[Sequence[float] | None] | None = None,
     ) -> list[PSpiralFitResult]: ...
     def fit_spiral_with_background(
         self,
@@ -81,6 +85,7 @@ class PSpiralFitter:
         num_components: int | None = None,
         winding: int | None = None,
         improve_background: bool = True,
+        warm_start: Sequence[float] | None = None,
     ) -> PSpiralFitResult: ...
     def fit_spiral_with_background_events(
         self,
@@ -94,6 +99,7 @@ class PSpiralFitter:
         num_components: int | None = None,
         winding: int | None = None,
         improve_background: bool = True,
+        warm_start: Sequence[float] | None = None,
     ) -> PSpiralFitIterator: ...
 
 class PSpiralFitIterator:
@@ -127,5 +133,9 @@ class PSpiralFitResult:
     def nfev(self) -> int: ...
     @property
     def nit(self) -> int: ...
+    @property
+    def optimizer_success(self) -> bool: ...
+    @property
+    def optimizer_message(self) -> str: ...
     @property
     def terminal(self) -> bool: ...

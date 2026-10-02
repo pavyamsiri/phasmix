@@ -160,6 +160,45 @@ impl DynamicTikTak {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
+        self.minimize_with_warm_start(cost_func, bounds, None)
+    }
+
+    /// Add a finite, in-bounds parameter vector as an extra retained restart.
+    ///
+    /// # Errors
+    /// Returns an error when objective evaluation fails.
+    ///
+    /// # Panics
+    /// Panics for a warm start with incorrect dimension or values outside bounds.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Global sampling and parallel local restarts form one optimization pass"
+    )]
+    pub fn minimize_with_warm_start<C>(
+        &self,
+        cost_func: &C,
+        bounds: &[(f64, f64)],
+        warm_start: Option<&[f64]>,
+    ) -> Result<OptimizationResult, C::Error>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64>
+            + Clone
+            + fmt::Debug
+            + Sync
+            + Send
+            + basin::BoxConstraints,
+        C::Error: Send + fmt::Display,
+    {
+        if let Some(point) = warm_start {
+            assert_eq!(point.len(), bounds.len(), "warm start must match bounds");
+            assert!(
+                point
+                    .iter()
+                    .zip(bounds)
+                    .all(|(&value, &(lb, ub))| value.is_finite() && value >= lb && value <= ub),
+                "warm start must be finite and within bounds"
+            );
+        }
         assert_eq!(
             bounds.len(),
             self.points.first().map_or(0, Vec::len),
@@ -193,7 +232,23 @@ impl DynamicTikTak {
             self.num_star,
             "the heap contains the top `num_star` points."
         );
-        let best_points = heap.into_sorted_vec();
+        let mut best_points = heap.into_sorted_vec();
+        if let Some(point) = warm_start {
+            let point = point.to_vec();
+            best_points.push(OrderedPoint {
+                cost: cost_func.cost(&point)?,
+                point,
+            });
+            best_points.sort();
+        }
+        let warm_solution = warm_start.map(|point| {
+            let seed = best_points
+                .iter()
+                .find(|seed| seed.point == point)
+                .expect("warm start was retained");
+            (seed.cost, seed.point.clone(), 0)
+        });
+        let num_restarts = best_points.len();
         let global_best = best_points
             .first()
             .expect("num_star is at least one")
@@ -204,7 +259,7 @@ impl DynamicTikTak {
             .enumerate()
             .filter_map(|(idx, seed)| {
                 let weight = (usize_to_f64!(idx + 1, "the index cannot exceed 2^52.")
-                    / usize_to_f64!(self.num_star, "`num_star` cannot exceed 2^52."))
+                    / usize_to_f64!(num_restarts, "`num_star` cannot exceed 2^52."))
                 .sqrt()
                 .clamp(self.min_weight, self.max_weight);
                 let new_seed: Vec<f64> = seed
@@ -216,7 +271,11 @@ impl DynamicTikTak {
                 match basin::Executor::new(
                     cost_func.clone(),
                     basin::NelderMead::standard().projected(),
-                    basin::BasicSimplexState::new(new_seed),
+                    basin::BasicSimplexState::new(if warm_start == Some(seed.point.as_slice()) {
+                        seed.point
+                    } else {
+                        new_seed
+                    }),
                 )
                 .max_iter(200)
                 .run()
@@ -233,6 +292,9 @@ impl DynamicTikTak {
                 }
             })
             .collect::<Vec<_>>();
+        if let Some(solution) = warm_solution {
+            solutions.push(solution);
+        }
         solutions.sort_by(|left, right| {
             left.0
                 .partial_cmp(&right.0)
@@ -243,7 +305,8 @@ impl DynamicTikTak {
             .iter()
             .map(|(_, _, evaluations)| evaluations)
             .sum::<u64>()
-            + u64::try_from(self.num_samples).expect("sample count fits in u64");
+            + u64::try_from(self.num_samples + usize::from(warm_start.is_some()))
+                .expect("sample count fits in u64");
         Ok(OptimizationResult {
             params: params.clone(),
             cost: *cost,
@@ -356,6 +419,45 @@ impl<const N: usize> TikTak<N> {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
+        self.minimize_with_warm_start(cost_func, bounds, None)
+    }
+
+    /// Add a finite, in-bounds parameter vector as an extra retained restart.
+    ///
+    /// # Errors
+    /// Returns an error when objective evaluation fails.
+    ///
+    /// # Panics
+    /// Panics for a warm start with incorrect dimension or values outside bounds.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Global sampling and parallel local restarts form one optimization pass"
+    )]
+    pub fn minimize_with_warm_start<C>(
+        &self,
+        cost_func: &C,
+        bounds: &[(f64, f64)],
+        warm_start: Option<&[f64]>,
+    ) -> Result<OptimizationResult, C::Error>
+    where
+        C: CostFunction<Param = Vec<f64>, Output = f64>
+            + Clone
+            + fmt::Debug
+            + Sync
+            + Send
+            + basin::BoxConstraints,
+        C::Error: Send + fmt::Display,
+    {
+        if let Some(point) = warm_start {
+            assert_eq!(point.len(), bounds.len(), "warm start must match bounds");
+            assert!(
+                point
+                    .iter()
+                    .zip(bounds)
+                    .all(|(&value, &(lb, ub))| value.is_finite() && value >= lb && value <= ub),
+                "warm start must be finite and within bounds"
+            );
+        }
         let mut heap: BinaryHeap<OrderedPoint> = BinaryHeap::with_capacity(self.num_star + 1);
 
         let evaluated_points: Vec<_> = self
@@ -389,7 +491,23 @@ impl<const N: usize> TikTak<N> {
             "the heap contains the top `num_star` points."
         );
 
-        let best_points = heap.into_sorted_vec();
+        let mut best_points = heap.into_sorted_vec();
+        if let Some(point) = warm_start {
+            let point = point.to_vec();
+            best_points.push(OrderedPoint {
+                cost: cost_func.cost(&point)?,
+                point,
+            });
+            best_points.sort();
+        }
+        let warm_solution = warm_start.map(|point| {
+            let seed = best_points
+                .iter()
+                .find(|seed| seed.point == point)
+                .expect("warm start was retained");
+            (seed.cost, seed.point.clone(), 0)
+        });
+        let num_restarts = best_points.len();
 
         let global_best_param: Vec<f64> = best_points
             .first()
@@ -402,7 +520,7 @@ impl<const N: usize> TikTak<N> {
             .enumerate()
             .filter_map(|(idx, current_seed)| {
                 let weight = ((usize_to_f64!(idx + 1, "the indices will never exceed 2^52."))
-                    / (usize_to_f64!(self.num_star, "`num_star` can never exceed 2^52.")))
+                    / (usize_to_f64!(num_restarts, "`num_star` can never exceed 2^52.")))
                 .sqrt()
                 .clamp(self.min_weight, self.max_weight);
 
@@ -418,7 +536,13 @@ impl<const N: usize> TikTak<N> {
                 match basin::Executor::new(
                     cost_func.clone(),
                     basin::NelderMead::standard().projected(),
-                    basin::BasicSimplexState::new(new_seed),
+                    basin::BasicSimplexState::new(
+                        if warm_start == Some(current_seed.point.as_slice()) {
+                            current_seed.point
+                        } else {
+                            new_seed
+                        },
+                    ),
                 )
                 .max_iter(200)
                 .run()
@@ -435,6 +559,9 @@ impl<const N: usize> TikTak<N> {
             })
             .collect::<Vec<(f64, Vec<f64>, u64)>>();
 
+        if let Some(solution) = warm_solution {
+            solutions.push(solution);
+        }
         solutions.sort_by(|left, right| {
             left.0
                 .partial_cmp(&right.0)
@@ -442,7 +569,7 @@ impl<const N: usize> TikTak<N> {
         });
 
         let nfev = solutions.iter().map(|(_, _, nfev)| nfev).sum::<u64>()
-            + u64::try_from(self.num_samples)
+            + u64::try_from(self.num_samples + usize::from(warm_start.is_some()))
                 .expect("the number of samples will never exceed 2^16.");
         let (global_best_cost, actual_global_best_param, _) = solutions
             .first()
@@ -505,5 +632,85 @@ mod tests {
     #[test]
     fn smoke() {
         assert!(run().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod warm_start_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use core::convert::Infallible;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug)]
+    struct RecordingObjective {
+        lower: Vec<f64>,
+        upper: Vec<f64>,
+        evaluations: Arc<Mutex<Vec<Vec<f64>>>>,
+    }
+
+    impl CostFunction for RecordingObjective {
+        type Param = Vec<f64>;
+        type Output = f64;
+        type Error = Infallible;
+        fn cost(&self, param: &Vec<f64>) -> Result<f64, Self::Error> {
+            self.evaluations.lock().unwrap().push(param.clone());
+            Ok(param.iter().map(|value| (value - 0.123).powi(2)).sum())
+        }
+    }
+    impl basin::BoxConstraints for RecordingObjective {
+        fn lower(&self) -> &Vec<f64> {
+            &self.lower
+        }
+        fn upper(&self) -> &Vec<f64> {
+            &self.upper
+        }
+    }
+    fn objective() -> RecordingObjective {
+        RecordingObjective {
+            lower: vec![0.0],
+            upper: vec![1.0],
+            evaluations: Arc::default(),
+        }
+    }
+
+    #[test]
+    fn both_tiktak_variants_keep_warm_start_in_addition_to_sobol_points() {
+        let fixed = TikTak::<1>::new(1, 0.25, 0.1, 0.995);
+        let dynamic = DynamicTikTak::new(1, 1, 0.25, 0.1, 0.995);
+        for runtime in [false, true] {
+            let objective = objective();
+            let result = if runtime {
+                dynamic.minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&[0.123]))
+            } else {
+                fixed.minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&[0.123]))
+            }
+            .unwrap();
+            let points = objective.evaluations.lock().unwrap().clone();
+            assert_eq!(points[fixed.num_samples], vec![0.123]);
+            assert_eq!(result.nfev, u64::try_from(points.len()).unwrap());
+            assert_eq!(result.params, vec![0.123]);
+            assert_eq!(fixed.points.len(), fixed.num_samples);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "warm start must match bounds")]
+    fn rejects_wrong_dimension() {
+        let _ = TikTak::<1>::new(1, 0.25, 0.1, 0.995).minimize_with_warm_start(
+            &objective(),
+            &[(0.0, 1.0)],
+            Some(&[]),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "warm start must be finite and within bounds")]
+    fn rejects_nonfinite_value() {
+        let _ = DynamicTikTak::new(1, 1, 0.25, 0.1, 0.995).minimize_with_warm_start(
+            &objective(),
+            &[(0.0, 1.0)],
+            Some(&[f64::NAN]),
+        );
     }
 }

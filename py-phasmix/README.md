@@ -4,9 +4,9 @@ Fit phase-spiral models to position/velocity samples or an existing count map.
 The examples below describe the Python fitter; the private Rust binding does
 not yet expose the same bounds or outcome API.
 
-## Experimental bootstrap uncertainty (Python only)
+## Experimental bootstrap uncertainty
 
-Run uncertainty estimation after a fit, using the same Python `fitter` and its
+Run uncertainty estimation after a fit, using the same Python or Rust `fitter` and its
 unchanged configuration. Normal fits do no bootstrap work. Given a successful
 `outcome` from any fitting method:
 
@@ -45,7 +45,7 @@ uncertainty = bootstrap_uncertainty(
     n_resamples=200,
     seed=42,
     workers=4,
-    maxiter=500,  # local optimizer limit per parameter fit
+    maxiter=None,  # backend default: Python 500, Rust 1500
 )
 ```
 
@@ -56,7 +56,8 @@ fixed-background count bootstrap. Custom callbacks must be thread-safe when
 using multiple workers; arrays and fitter settings must not change during a run.
 
 Both workflows start each replicate at the original fitted parameters and use
-scaled, bounded L-BFGS-B, including each background-refinement update. Full-period
+scaled, bounded local optimization: L-BFGS-B for Python or Nelder-Mead for Rust,
+including each background-refinement update. Full-period
 phase bounds are centered on the original phase to permit crossing the usual
 `-pi/pi` seam; genuinely restricted phase intervals are preserved. Results unwrap
 phases around the original fit and match exchangeable two-component estimates.
@@ -277,3 +278,35 @@ differential evolution and does not support TikTak.
 Rust callers select `GlobalOptimizer::TikTak(...)` or
 `GlobalOptimizer::DifferentialEvolution(...)` through `PSpiralFitterND.optimizer`.
 The latter accepts a `phasmix_deopt::DifferentialEvolution` with custom settings.
+
+## Rust warm starts
+
+The Rust backend accepts `warm_start` in single fits, event generators, and
+`FitInput` batch items with either `optimizer="tiktak"` or
+`optimizer="differential_evolution"`. Specify `num_components=1` or `2` and pass
+a full vector in component order: `alpha, b, c, theta0, scale_factor, rho`.
+Include fixed parameters with their configured values. Values must be finite
+and within the bounds.
+
+The warm start adds one candidate to the configured population. Differential
+evolution evolves that extra member; TikTak keeps its normal Sobol samples and
+retained seeds, then adds the warm start as an extra local restart. Later
+background-refinement iterations reuse the best fitted vector as a warm start.
+
+## Rust local Nelder-Mead
+
+Use `PSpiralFitter(backend="rust", optimizer="nelder_mead", nelder_mead_maxiter=1500)`
+for one bounded local search per winding candidate. Supply `warm_start` and `num_components` for
+every fit, including batch items. This mode skips global sampling, removes fixed
+parameters from the simplex, and scales free parameters to their bounds. An
+all-fixed model requires one objective evaluation. The optimizer iteration limit
+is separate from `max_iterations`, which controls background refinement.
+
+`RustFitBackend.with_local_optimizer(maxiter=1500)` creates an isolated local-only
+copy with the same fitting configuration. `bootstrap_uncertainty` uses this
+local-only mode automatically for Rust fitters.
+
+Update parameter bounds after initialization with `fitter.update_bounds(bounds)`.
+The update validates the constraints and synchronizes the backend and its native
+fitter. It applies to subsequent fits; wait for active fits or bootstrap runs to
+finish before updating configuration. Bootstrap updates only its isolated copy.

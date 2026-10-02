@@ -99,7 +99,8 @@ class PSpiralFitter:
         self,
         *,
         backend: Literal["python", "rust"] = "python",
-        optimizer: Literal["tiktak", "differential_evolution"] | None = None,
+        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"] | None = None,
+        nelder_mead_maxiter: int = 1500,
         max_iterations: int | None = 50,
         atol: float = 0.0,
         rtol: float = 0.0,
@@ -114,12 +115,17 @@ class PSpiralFitter:
         backend : {"python", "rust"}
             Backend selected for this fitter instance. The Rust backend currently
             supports only the subset documented by `RustFitBackend`.
-        optimizer : {"tiktak", "differential_evolution"} | None
+        optimizer : {"tiktak", "differential_evolution", "nelder_mead"} | None
             None preserves the backend default: SciPy differential evolution for
-            Python, TikTak for Rust. The Rust backend supports either optimizer;
+            Python, TikTak for Rust. The Rust backend supports all three optimizers;
             its differential evolution uses 15 members per parameter, at most 100
             generations, and projected Nelder-Mead polishing. Python supports
             differential evolution only, with its existing SciPy settings.
+            Rust nelder_mead performs one bounded local search per winding candidate and requires a
+            warm_start and an explicit num_components for every fit.
+        nelder_mead_maxiter : int
+            Positive iteration limit for Rust's local-only Nelder-Mead optimizer.
+            Default 1500. Separate from background-refinement max_iterations.
         max_iterations : int | None
             Maximum number of refinement attempts, excluding the initial fit.
             Default 50. Zero retains the initial fit; None imposes no iteration
@@ -167,10 +173,19 @@ class PSpiralFitter:
                 mask_func=mask_func,
                 bounds=bounds,
                 optimizer=optimizer if optimizer is not None else "tiktak",
+                nelder_mead_maxiter=nelder_mead_maxiter,
             )
         else:
             msg = "Only `python` and `rust` backends are currently supported."  # pyright: ignore[reportUnreachable]
             raise ValueError(msg)
+
+    def update_bounds(self, bounds: ParameterBounds | Sequence[ParameterBounds]) -> None:
+        """Validate and replace parameter bounds for subsequent fits.
+
+        Update the active backend as well as its native optimizer configuration.
+        In-flight fits must finish before changing fitter configuration.
+        """
+        self._backend.update_bounds(bounds)
 
     def fit_batch(self, inputs: Sequence[FitInput], *, workers: int | None = None) -> list[FitOutcome]:
         """Fit prepared grids as a batch using the configured backend.
