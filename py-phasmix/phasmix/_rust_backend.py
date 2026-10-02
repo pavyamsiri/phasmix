@@ -33,7 +33,10 @@ from ._backends import (
     SigmoidMaskConfig,
     SmoothConfig,
 )
+from ._internal import PSpiralComponent as RustPSpiralComponent
 from ._internal import PSpiralFitter as RustPSpiralFitter
+from ._internal import PSpiralModel as RustPSpiralModel
+from ._likelihood_utils import ln_likelihood
 from .bounds import Fixed, Interval, ParameterBounds
 from .model import PSpiralModel
 
@@ -163,6 +166,31 @@ class RustFitBackend(FitBackend):
             raise ValueError(msg)
 
         return create_sigmoid_mask(1.0, 40.0)
+
+    def model_score(self, model: PSpiralModel, data: onp.Array2D[np.float64], mask: onp.Array2D[np.float64]) -> float:
+        """Score a trial model with the Rust fitter's fixed background scale."""
+        native = RustPSpiralModel(
+            [
+                RustPSpiralComponent(
+                    component.alpha,
+                    component.b,
+                    component.c,
+                    component.theta0,
+                    component.scale_factor,
+                    component.rho,
+                    component.winding,
+                )
+                for component in model.components
+            ]
+        )
+        prediction = native.perturbation(model.z_mesh.ravel(), model.vz_mesh.ravel()) * model.background.ravel()
+        if np.any(prediction < 0) or not np.any(prediction > 0):
+            return float("-inf")
+        return ln_likelihood(data, prediction.reshape(data.shape), mask)
+
+    def fitting_mask(self, z_mesh: onp.Array2D[np.float64], vz_mesh: onp.Array2D[np.float64]) -> onp.Array2D[np.float64]:
+        """Evaluate the configured residual mask for uncertainty calculations."""
+        return self._mask_func(z_mesh, vz_mesh)
 
     def component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]:
         """Return the bounds selected for the requested model size."""

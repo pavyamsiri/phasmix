@@ -193,6 +193,19 @@ class PythonFitBackend(FitBackend):
 
         return create_sigmoid_mask(1.0, 40.0)
 
+    def model_score(self, model: PSpiralModel, data: onp.Array2D[np.float64], mask: onp.Array2D[np.float64]) -> float:
+        """Score a trial model using the fitting objective's count normalization."""
+        prediction = model.prediction()
+        total = np.sum(prediction)
+        if not np.isfinite(total) or total <= 0 or np.any(prediction < 0):
+            return float("-inf")
+        prediction *= np.sum(data) / total
+        return ln_likelihood(data, prediction, mask)
+
+    def fitting_mask(self, z_mesh: onp.Array2D[np.float64], vz_mesh: onp.Array2D[np.float64]) -> onp.Array2D[np.float64]:
+        """Evaluate the configured residual mask for uncertainty calculations."""
+        return self._mask_func(z_mesh, vz_mesh)
+
     def component_bounds(self, num_components: int) -> tuple[ParameterBounds, ...]:
         """Return the bounds selected for the requested model size."""
         return tuple(self._component_bounds(num_components))

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmix import bootstrap_uncertainty, fit
+from phasmix import bootstrap_uncertainty, fit, profile_likelihood
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.fit import PSpiralFitter
 from phasmock.mock import MockModel
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from typing import Final
 
     from optype import numpy as onp
+    from phasmix import BootstrapResult, ProfileLikelihoodResult
+    from phasmix.fit import PSpiralFitResult
 
 
 FORMAT: Final[str] = "%(message)s"
@@ -159,9 +161,46 @@ def _main() -> None:
     log.info("Python final lnl: %.2f", res_py.lnl)
     log.info("Python pvalue: %f", res_py.final_model.pvalue(density, mask))
 
+    _compare_uncertainty(fitter_py, fitter_rust, res_py)
+
+    rs_background = res_rust.final_model.background.reshape(x_mesh.shape)
+    rs_density = res_rust.final_model.prediction()
+
+    fig = plt.figure(figsize=(12, 8))  # pyright: ignore[reportUnknownMemberType]
+    # [true density, python density, rust density]
+    # [true background, python background, rust background]
+    true_density_axes = fig.add_subplot(231)
+    py_density_axes = fig.add_subplot(232)
+    rs_density_axes = fig.add_subplot(233)
+    true_background_axes = fig.add_subplot(234)
+    py_background_axes = fig.add_subplot(235)
+    rs_background_axes = fig.add_subplot(236)
+
+    _ = true_density_axes.set_title("True density")  # pyright: ignore[reportUnknownMemberType]
+    _ = py_density_axes.set_title(f"Python density: lnl = {res_py.lnl}")  # pyright: ignore[reportUnknownMemberType]
+    _ = rs_density_axes.set_title(f"Rust density: lnl = {res_rust.lnl}")  # pyright: ignore[reportUnknownMemberType]
+    _ = true_background_axes.set_title("True background")  # pyright: ignore[reportUnknownMemberType]
+    _ = py_background_axes.set_title("Python background")  # pyright: ignore[reportUnknownMemberType]
+    _ = rs_background_axes.set_title("Rust background")  # pyright: ignore[reportUnknownMemberType]
+
+    _ = true_density_axes.pcolormesh(x_mesh, y_mesh, density)  # pyright: ignore[reportUnknownMemberType]
+    _ = py_density_axes.pcolormesh(x_mesh, y_mesh, res_py.final_model.prediction())  # pyright: ignore[reportUnknownMemberType]
+    _ = rs_density_axes.pcolormesh(x_mesh, y_mesh, rs_density)  # pyright: ignore[reportUnknownMemberType]
+
+    _ = true_background_axes.pcolormesh(x_mesh, y_mesh, initial_background)  # pyright: ignore[reportUnknownMemberType]
+    _ = py_background_axes.pcolormesh(x_mesh, y_mesh, res_py.final_model.background)  # pyright: ignore[reportUnknownMemberType]
+    _ = rs_background_axes.pcolormesh(x_mesh, y_mesh, rs_background)  # pyright: ignore[reportUnknownMemberType]
+
+    fig.tight_layout()
+    fig.savefig("./out.png")  # pyright: ignore[reportUnknownMemberType]
+    plt.close(fig)
+
+
+def _compare_uncertainty(fitter_py: PSpiralFitter, fitter_rust: PSpiralFitter, res_py: PSpiralFitResult) -> None:
+    """Benchmark both uncertainty methods on the same reference fit."""
     log.info("--- Bootstrap comparison: same Python reference, seed, counts, and bounds ---")
     parameter_names = ("alpha", "b", "c", "theta0", "scale_factor", "rho")
-    worker_counts = (1, 4, mp.cpu_count())
+    worker_counts = tuple(dict.fromkeys((1, 4, mp.cpu_count())))
     for name, bootstrap_fitter in (("Python", fitter_py), ("Rust", fitter_rust)):
         for worker_idx, workers in enumerate(worker_counts):
             start_time = time.perf_counter()
@@ -231,37 +270,66 @@ def _main() -> None:
                 for warning in uncertainty.warnings:
                     log.info("%s bootstrap note: %s", name, warning)
 
-    rs_background = res_rust.final_model.background.reshape(x_mesh.shape)
-    rs_density = res_rust.final_model.prediction()
+            try:
+                profile = profile_likelihood(
+                    bootstrap_fitter,
+                    res_py,
+                    workers=workers,
+                    confidence_level=uncertainty.confidence_level,
+                    model_phase_radius=uncertainty.model_phase_radius,
+                )
+            except RuntimeError as exc:
+                log.warning("%s profile likelihood failed: %s", name, exc)
+                continue
+            log.info(
+                "%s profile likelihood: %.3fs, workers=%d, nfev=%d; bootstrap/profile runtime ratio=%.3g",
+                name,
+                profile.elapsed_seconds,
+                workers,
+                profile.nfev,
+                elapsed_bootstrap / profile.elapsed_seconds,
+            )
+            if worker_idx == len(worker_counts) - 1:
+                _report_uncertainty_comparison(name, uncertainty, profile)
+                for warning in profile.warnings:
+                    log.info("%s profile note: %s", name, warning)
 
-    fig = plt.figure(figsize=(12, 8))  # pyright: ignore[reportUnknownMemberType]
-    # [true density, python density, rust density]
-    # [true background, python background, rust background]
-    true_density_axes = fig.add_subplot(231)
-    py_density_axes = fig.add_subplot(232)
-    rs_density_axes = fig.add_subplot(233)
-    true_background_axes = fig.add_subplot(234)
-    py_background_axes = fig.add_subplot(235)
-    rs_background_axes = fig.add_subplot(236)
 
-    _ = true_density_axes.set_title("True density")  # pyright: ignore[reportUnknownMemberType]
-    _ = py_density_axes.set_title(f"Python density: lnl = {res_py.lnl}")  # pyright: ignore[reportUnknownMemberType]
-    _ = rs_density_axes.set_title(f"Rust density: lnl = {res_rust.lnl}")  # pyright: ignore[reportUnknownMemberType]
-    _ = true_background_axes.set_title("True background")  # pyright: ignore[reportUnknownMemberType]
-    _ = py_background_axes.set_title("Python background")  # pyright: ignore[reportUnknownMemberType]
-    _ = rs_background_axes.set_title("Rust background")  # pyright: ignore[reportUnknownMemberType]
-
-    _ = true_density_axes.pcolormesh(x_mesh, y_mesh, density)  # pyright: ignore[reportUnknownMemberType]
-    _ = py_density_axes.pcolormesh(x_mesh, y_mesh, res_py.final_model.prediction())  # pyright: ignore[reportUnknownMemberType]
-    _ = rs_density_axes.pcolormesh(x_mesh, y_mesh, rs_density)  # pyright: ignore[reportUnknownMemberType]
-
-    _ = true_background_axes.pcolormesh(x_mesh, y_mesh, initial_background)  # pyright: ignore[reportUnknownMemberType]
-    _ = py_background_axes.pcolormesh(x_mesh, y_mesh, res_py.final_model.background)  # pyright: ignore[reportUnknownMemberType]
-    _ = rs_background_axes.pcolormesh(x_mesh, y_mesh, rs_background)  # pyright: ignore[reportUnknownMemberType]
-
-    fig.tight_layout()
-    fig.savefig("./out.png")  # pyright: ignore[reportUnknownMemberType]
-    plt.close(fig)
+def _report_uncertainty_comparison(name: str, bootstrap: BootstrapResult, profile: ProfileLikelihoodResult) -> None:
+    """Compare percentile and profile intervals at the same confidence level."""
+    bootstrap_intervals = np.vstack((bootstrap.intervals, bootstrap.model_phase_intervals))
+    profile_intervals = np.vstack((profile.intervals, profile.model_phase_intervals))
+    log.info("%s uncertainty comparison: %.1f%% intervals, fixed background", name, 100 * profile.confidence_level)
+    for item, bootstrap_interval, profile_interval in zip(profile.profiles, bootstrap_intervals, profile_intervals, strict=True):
+        angular = item.parameter in ("theta0", "model_phase")
+        boot = np.rad2deg(bootstrap_interval) if angular else bootstrap_interval
+        prof = np.rad2deg(profile_interval) if angular else profile_interval
+        unit = " deg" if angular else ""
+        boot_width = float(boot[2] - boot[0])
+        profile_width = float(prof[2] - prof[0])
+        ratio = profile_width / boot_width if boot_width > 0 else float("nan")
+        log.info(
+            "%s component %d %s: bootstrap %.6g -%.6g/+%.6g [%.6g, %.6g]%s; "
+            "profile %.6g -%.6g/+%.6g [%.6g, %.6g]%s (%s/%s); profile/bootstrap width=%.3g",
+            name,
+            item.component + 1,
+            item.parameter,
+            boot[1],
+            boot[1] - boot[0],
+            boot[2] - boot[1],
+            boot[0],
+            boot[2],
+            unit,
+            prof[1],
+            prof[1] - prof[0],
+            prof[2] - prof[1],
+            prof[0],
+            prof[2],
+            unit,
+            item.lower_status,
+            item.upper_status,
+            ratio,
+        )
 
 
 def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1) -> tuple[str, str]:
@@ -284,6 +352,8 @@ def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1)
         The rounded error.
 
     """
+    if not np.isfinite(value) or not np.isfinite(error) or error <= 0:
+        return f"{value:.6g}", f"{error:.6g}"
     order = np.floor(np.log10(error))
     places = max(int(num_sig_figs - order - 1), 0)
     return (np.format_float_positional(value, precision=places), np.format_float_positional(error, precision=places))

@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from phasmix import component, fit, model
-from phasmix.uncertainty import BootstrapReplicate, BootstrapResult, BootstrapSamples, bootstrap_uncertainty
+from phasmix.uncertainty import (
+    BootstrapReplicate,
+    BootstrapResult,
+    BootstrapSamples,
+    ProfileInterval,
+    ProfileLikelihoodResult,
+    ProfilePoint,
+    bootstrap_uncertainty,
+    profile_likelihood,
+)
 
 if TYPE_CHECKING:
     from typing import Final
@@ -15,8 +24,12 @@ __all__: Final[list[str]] = [
     "BootstrapReplicate",
     "BootstrapResult",
     "BootstrapSamples",
+    "ProfileInterval",
+    "ProfileLikelihoodResult",
+    "ProfilePoint",
     "bootstrap_uncertainty",
     "component",
     "fit",
     "model",
+    "profile_likelihood",
 ]

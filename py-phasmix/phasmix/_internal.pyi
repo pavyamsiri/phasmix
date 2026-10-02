@@ -17,7 +17,6 @@ class PSpiralComponent:
         scale_factor: float,
         rho: float,
         winding: int,
-        flattening_strength: float | None,
     ) -> None: ...
     @property
     def alpha(self) -> float: ...

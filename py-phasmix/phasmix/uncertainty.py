@@ -1,4 +1,4 @@
-"""Experimental bootstrap uncertainty with bounded local refits.
+"""Experimental bootstrap and profile-likelihood uncertainty with local refits.
 
 Results condition on the selected winding, component count, and local solution.
 Use the original fitter configuration; fitted results do not retain its provenance.
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from ._backends import FitFailure, FitTerminationReason, OptimizationDiagnostics
+from ._profile_likelihood import ProfileInterval, ProfileLikelihoodResult, ProfilePoint, profile_likelihood
 from .bounds import Interval, ParameterBounds
 from .component import PSpiralComponent
 from .param_layout import ParameterLayout
@@ -24,7 +25,16 @@ if TYPE_CHECKING:
     from ._backends import BackendResult, PSpiralFitResult
     from .fit import PSpiralFitter
 
-__all__ = ["BootstrapReplicate", "BootstrapResult", "BootstrapSamples", "bootstrap_uncertainty"]
+__all__ = [
+    "BootstrapReplicate",
+    "BootstrapResult",
+    "BootstrapSamples",
+    "ProfileInterval",
+    "ProfileLikelihoodResult",
+    "ProfilePoint",
+    "bootstrap_uncertainty",
+    "profile_likelihood",
+]
 
 
 @dataclass(frozen=True, kw_only=True)

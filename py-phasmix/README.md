@@ -4,6 +4,62 @@ Fit phase-spiral models to position/velocity samples or an existing count map.
 The examples below describe the Python fitter; the private Rust binding does
 not yet expose the same bounds or outcome API.
 
+## Experimental profile-likelihood uncertainty
+
+Profile parameters and each component's derived `model_phase` on the original
+count map, holding the final background fixed:
+
+```python
+from phasmix import profile_likelihood
+
+profile = profile_likelihood(
+    fitter, outcome.result, confidence_level=0.95,
+    model_phase_radius=0.5, workers=4, maxiter=500,
+)
+print(profile.intervals)  # (6 * num_components, 3): lower, estimate, upper
+print(profile.errors)  # (6 * num_components, 2): lower/upper error magnitudes
+print(profile.model_phase_intervals)  # (num_components, 3), radians
+print(profile.model_phase_errors)  # (num_components, 2), radians
+print(profile.elapsed_seconds, profile.nfev)
+print(profile.warnings)
+```
+
+Each trial fixes one parameter or constrains `phi_s(r) + theta0`, then refits
+all nuisance parameters. Phase profiling allows `b`, `c`, and `theta0` to vary
+together without changing the model parameterization. Fixed parameters have
+zero errors. Phases use a continuous branch around the reference fit. Each
+`ProfileInterval` in `profiles` identifies its zero-based component and parameter,
+retains evaluated `ProfilePoint` objects and optimizer diagnostics, and reports
+`crossing`, `bound`, `fixed`, or `failed` separately for each endpoint. A `bound`
+endpoint is truncated by the search range; a failed endpoint is NaN.
+
+The API first polishes the reference using the same fixed-background objective
+used for all constrained fits; `reference` holds that estimate and
+`original_reference` retains the supplied fit. A failed baseline raises
+`RuntimeError`. Both fitter backends are accepted. SciPy performs scaled local
+optimization (L-BFGS-B, with SLSQP fallback, and SLSQP phase constraints);
+objective evaluation follows the configured backend, including Python count
+normalization and Rust native model evaluation. `workers` parallelizes profiles.
+`rtol` controls endpoint precision as a fraction of the search range.
+
+Intervals use a one-degree-of-freedom chi-square threshold on twice the score
+loss. The existing weighted residual score is not a full count likelihood, so
+nominal coverage is unvalidated. Background, component count, and winding are
+conditional, and the implementation follows a local solution without auditing
+global alternatives. Exchangeable components can make their individual profiles
+ambiguous. Inspect warnings before interpreting the results.
+
+For comparison, use `bootstrap_uncertainty` without `samples`, with the same
+fitter, result, confidence level, and phase radius. Compare `intervals` and
+`model_phase_intervals` directly. Profile `errors` are asymmetric errors at the
+requested confidence level; bootstrap `standard_errors` are one-sigma sampling
+spreads and should not be compared directly with 95% profile errors.
+The central values also differ: polished best-fit estimates for profiles and
+replicate medians for bootstrap. `scripts/smoke.py` reports both methods' runtimes,
+asymmetric interval errors, endpoint statuses, and profile/bootstrap interval
+width ratios for each backend and worker count. Runtime comparison does not
+establish equivalent interval coverage.
+
 ## Experimental bootstrap uncertainty
 
 Run uncertainty estimation after a fit, using the same Python or Rust `fitter` and its
