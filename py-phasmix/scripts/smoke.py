@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,13 +11,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmix import bootstrap_uncertainty, fit
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.fit import PSpiralFitter
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
+
+from phasmix import bootstrap_uncertainty, fit
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -160,8 +162,9 @@ def _main() -> None:
 
     log.info("--- Bootstrap comparison: same Python reference, seed, counts, and bounds ---")
     parameter_names = ("alpha", "b", "c", "theta0", "scale_factor", "rho")
+    worker_counts = (1, 4, mp.cpu_count())
     for name, bootstrap_fitter in (("Python", fitter_py), ("Rust", fitter_rust)):
-        for workers in (1, 4):
+        for worker_idx, workers in enumerate(worker_counts):
             start_time = time.perf_counter()
             uncertainty = bootstrap_uncertainty(bootstrap_fitter, res_py, n_resamples=200, seed=2, workers=workers)
             elapsed_bootstrap = time.perf_counter() - start_time
@@ -177,7 +180,7 @@ def _main() -> None:
                 evaluations,
                 iterations,
             )
-            if workers == 4:
+            if worker_idx == (len(worker_counts) - 1):
                 for index, (_, error, interval) in enumerate(
                     zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
                 ):
