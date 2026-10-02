@@ -15,7 +15,9 @@ use basin::{BoxConstraints, CostFunction};
 use core::{convert, fmt};
 use itertools::izip;
 use phasmix_core::{PSpiralComponent, PSpiralModel, Winding, ln_likelihood};
-use phasmix_tiktak::{DynamicTikTak, TikTak};
+use phasmix_opt::differential_evolution::OptimizationError;
+use phasmix_opt::tiktak::OptimizationResult;
+use phasmix_opt::tiktak::{DynamicTikTak, TikTak};
 use wide::CmpLe as _;
 use wide::f64x4;
 
@@ -803,7 +805,7 @@ pub(crate) struct FitOptimizationResult {
 }
 
 impl FitOptimizationResult {
-    fn from_global(result: phasmix_tiktak::OptimizationResult) -> Self {
+    fn from_global(result: OptimizationResult) -> Self {
         Self {
             params: result.params,
             cost: result.cost,
@@ -823,7 +825,7 @@ pub enum GlobalOptimizer<const N: usize> {
     /// Sobol exploration followed by local restarts.
     TikTak(TikTak<N>),
     /// Differential evolution with deferred, parallel population evaluations.
-    DifferentialEvolution(phasmix_deopt::DifferentialEvolution),
+    DifferentialEvolution(phasmix_opt::differential_evolution::DifferentialEvolution),
     /// One bounded local search from a required warm start.
     NelderMead { max_iter: usize },
 }
@@ -852,7 +854,7 @@ impl<const N: usize> GlobalOptimizer<N> {
     /// Construct a differential evolution optimizer with 15 members per parameter.
     #[must_use]
     pub const fn differential_evolution() -> Self {
-        Self::DifferentialEvolution(phasmix_deopt::DifferentialEvolution {
+        Self::DifferentialEvolution(phasmix_opt::differential_evolution::DifferentialEvolution {
             pop_size: 15 * N,
             max_iter: 100,
             atol: 0.0,
@@ -865,7 +867,7 @@ impl<const N: usize> GlobalOptimizer<N> {
         objective: &C,
         bounds: &[(f64, f64)],
         warm_start: Option<&[f64]>,
-    ) -> Result<FitOptimizationResult, phasmix_deopt::OptimizationError<C::Error>>
+    ) -> Result<FitOptimizationResult, OptimizationError<C::Error>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
             + Clone
@@ -882,16 +884,14 @@ impl<const N: usize> GlobalOptimizer<N> {
             Self::TikTak(optimizer) => optimizer
                 .minimize_with_warm_start(objective, bounds, warm_start)
                 .map(FitOptimizationResult::from_global)
-                .map_err(phasmix_deopt::OptimizationError::CostFunction),
+                .map_err(OptimizationError::CostFunction),
             Self::DifferentialEvolution(optimizer) => {
                 let result = optimizer.minimize_with_warm_start(objective, bounds, warm_start)?;
-                Ok(FitOptimizationResult::from_global(
-                    phasmix_tiktak::OptimizationResult {
-                        params: result.params,
-                        cost: result.cost,
-                        nfev: result.nfev,
-                    },
-                ))
+                Ok(FitOptimizationResult::from_global(OptimizationResult {
+                    params: result.params,
+                    cost: result.cost,
+                    nfev: result.nfev,
+                }))
             }
         }
     }

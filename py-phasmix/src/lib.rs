@@ -368,13 +368,13 @@ impl PSpiralFitter {
                 },
             ),
             "tiktak" => (
-                GlobalOptimizer::TikTak(phasmix_tiktak::TikTak::<6>::new(
+                GlobalOptimizer::TikTak(phasmix_opt::tiktak::TikTak::<6>::new(
                     12,
                     128.0f32.recip(),
                     0.1,
                     0.995,
                 )),
-                GlobalOptimizer::TikTak(phasmix_tiktak::TikTak::<12>::new(
+                GlobalOptimizer::TikTak(phasmix_opt::tiktak::TikTak::<12>::new(
                     12,
                     128.0f32.recip(),
                     0.1,

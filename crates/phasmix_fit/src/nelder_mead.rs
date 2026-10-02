@@ -3,7 +3,7 @@
 use super::{FitOptimizationResult, OptimizerDiagnostics};
 use basin::{BoxConstraints, CostFunction};
 use core::fmt;
-use phasmix_deopt::{DifferentialEvolutionError, OptimizationError};
+use phasmix_opt::differential_evolution::{DifferentialEvolutionError, OptimizationError};
 
 #[derive(Clone, Debug)]
 struct ScaledObjective<'prob, C> {

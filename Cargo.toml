@@ -2,11 +2,10 @@
 members = [
     "crates/phasmix_core",
     "py-phasmix",
-    "crates/phasmix_tiktak",
     "crates/phasmix_fit",
     "crates/phasmix_mock",
     "crates/phasmix_math",
-    "crates/phasmix_deopt",
+    "crates/phasmix_opt",
 ]
 resolver = "3"
 
@@ -34,8 +33,7 @@ phasmix_core = { path = "crates/phasmix_core" }
 phasmix_fit = { path = "crates/phasmix_fit" }
 phasmix_math = { path = "crates/phasmix_math" }
 phasmix_mock = { path = "crates/phasmix_mock" }
-phasmix_tiktak = { path = "crates/phasmix_tiktak" }
-phasmix_deopt = { path = "crates/phasmix_deopt" }
+phasmix_opt = { path = "crates/phasmix_opt" }
 
 [profile.release]
 debug = true

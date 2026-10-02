@@ -1,5 +1,5 @@
 [package]
-name = "phasmix_deopt"
+name = "phasmix_opt"
 version = "0.0.0"
 edition = "2024"
 

@@ -955,10 +955,9 @@ dependencies = [
  "itertools 0.14.0",
  "ndarray 0.16.1",
  "phasmix_core",
- "phasmix_deopt",
  "phasmix_math",
  "phasmix_mock",
- "phasmix_tiktak",
+ "phasmix_opt",
  "rayon",
  "wide 1.4.0",
 ]
@@ -982,6 +981,23 @@ dependencies = [
  "itertools 0.14.0",
  "phasmix_core",
  "rand 0.10.1",
+]
+
+[[package]]
+name = "phasmix_opt"
+version = "0.0.0"
+dependencies = [
+ "argmin",
+ "argmin-math",
+ "argmin-observer-slog",
+ "argmin_testfunctions",
+ "basin",
+ "ndarray 0.16.1",
+ "phasmix_core",
+ "rand 0.10.1",
+ "rayon",
+ "sobol",
+ "sobol_burley",
 ]
 
 [[package]]
@@ -1111,7 +1127,7 @@ dependencies = [
  "numpy",
  "phasmix_core",
  "phasmix_fit",
- "phasmix_tiktak",
+ "phasmix_opt",
  "pyo3",
  "rayon",
  "statrs",

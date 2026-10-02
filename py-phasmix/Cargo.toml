@@ -13,7 +13,7 @@ itertools = { workspace = true }
 pyo3 = { workspace = true }
 phasmix_core = { workspace = true }
 phasmix_fit = { workspace = true }
-phasmix_tiktak = { workspace = true }
+phasmix_opt = { workspace = true }
 numpy = { workspace = true }
 rayon = { workspace = true }
 statrs = { workspace = true }
