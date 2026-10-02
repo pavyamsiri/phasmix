@@ -59,7 +59,7 @@ def test_count_bootstrap_is_local_reproducible_and_nonmutating(fitted: tuple[PSp
     assert all(item.count_total == int(result.data.sum()) for item in serial.replicates)
     assert np.all(serial.parameters[:, 0] >= 0)
     assert np.all(serial.parameters[:, 0] <= 0.9)
-    assert serial.intervals.shape == (6, 2)
+    assert serial.intervals.shape == (6, 3)
     assert serial.covariance.shape == (6, 6)
     assert serial.method == "parametric_counts"
 
@@ -219,3 +219,38 @@ def test_rust_two_component_bootstrap_centers_each_phase_independently() -> None
     )
     assert isinstance(repeated, FitSuccess)
     np.testing.assert_array_equal(repeated.result.final_model.parameters, original)
+
+
+def test_model_phase_summary_uses_joint_replicate_parameters() -> None:
+    from phasmix._backends import OptimizationDiagnostics  # noqa: PLC0415
+    from phasmix.component import PSpiralComponent  # noqa: PLC0415
+    from phasmix.param_layout import ParameterLayout  # noqa: PLC0415
+    from phasmix.uncertainty import (  # noqa: PLC0415
+        BootstrapReplicate,
+        _summarize,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    reference = np.array([0.4, 0.05, 0.002, 3.1, 40.0, 0.09])
+    draws = np.tile(reference, (3, 1))
+    draws[:, 1:4] = [[0.04, 0.001, 3.0], [0.06, 0.003, 3.2], [0.08, 0.004, 3.3]]
+    diagnostics = OptimizationDiagnostics(success=True, message="test", nfev=0, nit=0)
+    replicates = tuple(BootstrapReplicate(i, row, diagnostics, "test", 100) for i, row in enumerate(draws))
+    replicates += (BootstrapReplicate(3, None, diagnostics, "failed", 100),)
+    summary = _summarize(
+        replicates,
+        reference,
+        ParameterLayout.from_bounds((ParameterBounds(),)),
+        exchangeable=False,
+        method="parametric_counts",
+        confidence_level=0.8,
+        seed=0,
+        maxiter=10,
+        model_phase_radius=0.7,
+    )
+    phases = np.array([PSpiralComponent.from_array(row, winding=1, flattening_strength=0.1).model_phase(0.7) for row in draws])
+    np.testing.assert_allclose(summary.model_phases[:3, 0], phases)
+    assert np.isnan(summary.model_phases[3, 0])
+    np.testing.assert_allclose(summary.model_phase_standard_errors, [np.std(phases, ddof=1)])
+    np.testing.assert_allclose(summary.model_phase_intervals[0], np.quantile(phases, [0.1, 0.5, 0.9]))
+    np.testing.assert_allclose(summary.median, np.median(draws, axis=0))
+    assert summary.median[1] != reference[1]

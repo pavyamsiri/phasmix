@@ -11,14 +11,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
+from phasmix import bootstrap_uncertainty, fit
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.fit import PSpiralFitter
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
-
-from phasmix import bootstrap_uncertainty, fit
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -182,21 +181,52 @@ def _main() -> None:
             )
             if worker_idx == (len(worker_counts) - 1):
                 for index, (_, error, interval) in enumerate(
-                    zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
+                    zip(uncertainty.median, uncertainty.standard_errors, uncertainty.intervals, strict=True)
                 ):
                     component, parameter = divmod(index, len(parameter_names))
-                    (median_param, error_bar) = round_value_with_error(interval[1], 1.96 * error)
-                    (lower_param, _) = round_value_with_error(interval[0], 1.96 * error)
-                    (upper_param, _) = round_value_with_error(interval[2], 1.96 * error)
+                    if parameter_names[parameter] != "theta0":
+                        (median_param, error_bar) = round_value_with_error(interval[1], 1.96 * error)
+                        (lower_param, _) = round_value_with_error(interval[0], 1.96 * error)
+                        (upper_param, _) = round_value_with_error(interval[2], 1.96 * error)
+                        log.info(
+                            "%s component %d %s: %s +/- %s [%s, %s]",
+                            name,
+                            component + 1,
+                            parameter_names[parameter],
+                            median_param,
+                            error_bar,
+                            lower_param,
+                            upper_param,
+                        )
+                    else:
+                        median_phase, error_bar = round_value_with_error(np.rad2deg(interval[1]), 1.96 * np.rad2deg(error))
+                        lower_phase, _ = round_value_with_error(np.rad2deg(interval[0]), 1.96 * np.rad2deg(error))
+                        upper_phase, _ = round_value_with_error(np.rad2deg(interval[2]), 1.96 * np.rad2deg(error))
+                        log.info(
+                            "%s component %d %s: %s +/- %s [%s, %s] deg",
+                            name,
+                            component,
+                            parameter_names[parameter],
+                            median_phase,
+                            error_bar,
+                            lower_phase,
+                            upper_phase,
+                        )
+                for component, (error, interval) in enumerate(
+                    zip(uncertainty.model_phase_standard_errors, uncertainty.model_phase_intervals, strict=True), start=1
+                ):
+                    median_phase, error_bar = round_value_with_error(np.rad2deg(interval[1]), 1.96 * np.rad2deg(error))
+                    lower_phase, _ = round_value_with_error(np.rad2deg(interval[0]), 1.96 * np.rad2deg(error))
+                    upper_phase, _ = round_value_with_error(np.rad2deg(interval[2]), 1.96 * np.rad2deg(error))
                     log.info(
-                        "%s component %d %s: %s +/- %s [%s, %s]",
+                        "%s component %d model_phase(r=%g): %s +/- %s [%s, %s] deg",
                         name,
-                        component + 1,
-                        parameter_names[parameter],
-                        median_param,
+                        component,
+                        uncertainty.model_phase_radius,
+                        median_phase,
                         error_bar,
-                        lower_param,
-                        upper_param,
+                        lower_phase,
+                        upper_phase,
                     )
                 for warning in uncertainty.warnings:
                     log.info("%s bootstrap note: %s", name, warning)

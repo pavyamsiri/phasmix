@@ -9,17 +9,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-from phasmock.component import AlinderComponent, GaussianComponent
-from phasmock.mock import MockModel
-from rich.console import Console
-from rich.logging import RichHandler
-from scipy import optimize
-
 from phasmix import bootstrap_uncertainty, fit
 from phasmix._background_utils import generate_initial_background
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.bounds import Fixed, Interval, ParameterBounds
 from phasmix.fit import FitSuccess, PSpiralFitter
+from phasmock.component import AlinderComponent, GaussianComponent
+from phasmock.mock import MockModel
+from rich.console import Console
+from rich.logging import RichHandler
+from scipy import optimize
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -233,14 +232,26 @@ def _main() -> None:
     elapsed_bootstrap = time.perf_counter() - start_time
     log.info("Bootstrap alone took %.3f seconds", elapsed_bootstrap)
     log.info("Successful local refits: %d/%d", uncertainty.n_successful, len(uncertainty.replicates))
-    log.info("Parameter estimates +/- bootstrap standard errors; 95% percentile intervals:")
+    log.info("Parameter medians +/- bootstrap standard errors; 95% percentile intervals:")
     parameter_names = ("alpha", "b", "c", "theta0", "scale_factor", "rho")
     for index, (estimate, error, interval) in enumerate(
-        zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
+        zip(uncertainty.median, uncertainty.standard_errors, uncertainty.intervals, strict=True)
     ):
         component, parameter = divmod(index, len(parameter_names))
         log.info("\tComponent %d %s", component + 1, parameter_names[parameter])
-        log.info("\t%.6g +/- %.6g [%.6g, %.6g]", estimate, error, interval[0], interval[1])
+        log.info("\t%.6g +/- %.6g [%.6g, %.6g]", estimate, error, interval[0], interval[2])
+    for component, (error, interval) in enumerate(
+        zip(uncertainty.model_phase_standard_errors, uncertainty.model_phase_intervals, strict=True), start=1
+    ):
+        log.info(
+            "Component %d model_phase(r=%g): %.6g +/- %.6g [%.6g, %.6g] rad",
+            component,
+            uncertainty.model_phase_radius,
+            interval[1],
+            error,
+            interval[0],
+            interval[2],
+        )
     for warning in uncertainty.warnings:
         log.info("Bootstrap note: %s", warning)
 

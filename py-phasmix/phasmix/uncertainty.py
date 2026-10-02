@@ -15,6 +15,7 @@ import numpy as np
 
 from ._backends import FitFailure, FitTerminationReason, OptimizationDiagnostics
 from .bounds import Interval, ParameterBounds
+from .component import PSpiralComponent
 from .param_layout import ParameterLayout
 
 if TYPE_CHECKING:
@@ -58,6 +59,10 @@ class BootstrapResult:
 
     ``parameters`` has one row per requested replicate; failures are NaN rows.
     Angles are unwrapped around ``reference`` and exchangeable components aligned.
+    ``intervals`` columns are lower, median, upper. ``model_phases`` contains
+    phi_s(r) + theta0 for each replicate and component, using aligned theta0
+    without wrapping the derived phase. Its errors and intervals use the same
+    accepted draws at ``model_phase_radius``.
     Covariance uses accepted replicates and ddof=1. Intervals are percentile
     intervals, not calibrated guarantees. Summaries are NaN with fewer than two
     accepted draws. Inspect ``warnings`` and ``replicates`` before using them.
@@ -69,12 +74,21 @@ class BootstrapResult:
     standard_errors: onp.Array1D[np.float64]
     intervals: onp.Array2D[np.float64]
     bias: onp.Array1D[np.float64]
+    model_phases: onp.Array2D[np.float64]
+    model_phase_standard_errors: onp.Array1D[np.float64]
+    model_phase_intervals: onp.Array2D[np.float64]
+    model_phase_radius: float
     replicates: tuple[BootstrapReplicate, ...]
     method: Literal["samples", "parametric_counts"]
     confidence_level: float
     seed: int
     maxiter: int
     warnings: tuple[str, ...]
+
+    @property
+    def median(self) -> onp.Array1D[np.float64]:
+        """Bootstrap parameter medians (the middle column of ``intervals``)."""
+        return self.intervals[:, 1]
 
     @property
     def n_successful(self) -> int:
@@ -154,13 +168,15 @@ def bootstrap_uncertainty(
     seed: int = 0,
     workers: int = 1,
     maxiter: int | None = None,
+    model_phase_radius: float = 0.5,
 ) -> BootstrapResult:
     """Bootstrap an existing fit using its original fitter configuration.
 
     With ``samples``, resample paired stars and rebuild their KDE, then repeat
     the specified refinement policy. Without samples, simulate multinomial
     counts from the fitted prediction and hold its background shape fixed.
-    Winding and component count remain fixed in both cases.
+    Winding and component count remain fixed in both cases. Derived model phases
+    are evaluated at ``model_phase_radius`` (0.5 by default).
 
     Each replicate starts at the original estimate using a bounded local optimizer:
     scaled L-BFGS-B for Python or scaled Nelder-Mead for Rust. ``maxiter=None``
@@ -175,6 +191,9 @@ def bootstrap_uncertainty(
     Both Python and Rust backends are supported. Callers must supply the same bounds,
     mask, smoothing, and refinement configuration used for the original fit.
     """
+    if not np.isfinite(model_phase_radius) or model_phase_radius < 0:
+        msg = "model_phase_radius must be finite and nonnegative."
+        raise ValueError(msg)
     backend = fitter._backend  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
     if maxiter is None:
         maxiter = backend.local_optimizer_maxiter
@@ -290,6 +309,7 @@ def bootstrap_uncertainty(
         confidence_level=confidence_level,
         seed=seed,
         maxiter=maxiter,
+        model_phase_radius=model_phase_radius,
     )
 
 
@@ -303,12 +323,21 @@ def _summarize(
     confidence_level: float,
     seed: int,
     maxiter: int,
+    model_phase_radius: float,
 ) -> BootstrapResult:
     n_resamples = len(replicates)
     parameters = np.full((n_resamples, reference.size), np.nan)
+    model_phases = np.full((n_resamples, reference.size // 6), np.nan)
     for item in replicates:
         if item.parameters is not None:
             parameters[item.index] = item.parameters
+            for component, values in enumerate(item.parameters.reshape(-1, 6)):
+                model_phases[item.index, component] = PSpiralComponent.from_array(
+                    values, flattening_strength=0.1, winding=1
+                ).model_phase(model_phase_radius)
+    accepted_phases = model_phases[np.all(np.isfinite(parameters), axis=1)]
+    phase_errors = np.full(reference.size // 6, np.nan)
+    phase_intervals = np.full((reference.size // 6, 3), np.nan)
     accepted = parameters[np.all(np.isfinite(parameters), axis=1)]
     warnings = ["Experimental local-refit bootstrap; global-search adequacy and interval coverage have not been validated."]
     if method == "parametric_counts":
@@ -328,6 +357,8 @@ def _summarize(
         covariance = np.asarray(np.cov(accepted, rowvar=False, ddof=1))
         tail = (1 - confidence_level) / 2
         intervals = np.quantile(accepted, [tail, 0.5, 1 - tail], axis=0).T
+        phase_errors = np.std(accepted_phases, axis=0, ddof=1)
+        phase_intervals = np.quantile(accepted_phases, [tail, 0.5, 1 - tail], axis=0).T
         bias = accepted.mean(axis=0) - reference
         fixed = np.ones(reference.size, dtype=np.bool_)
         fixed[layout.free_indices] = False
@@ -351,6 +382,10 @@ def _summarize(
         standard_errors=np.sqrt(np.diag(covariance)),
         intervals=intervals,
         bias=bias,
+        model_phases=model_phases,
+        model_phase_standard_errors=phase_errors,
+        model_phase_intervals=phase_intervals,
+        model_phase_radius=model_phase_radius,
         replicates=replicates,
         method=method,
         confidence_level=confidence_level,

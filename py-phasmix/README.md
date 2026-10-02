@@ -20,7 +20,10 @@ uncertainty = bootstrap_uncertainty(
 )
 print(uncertainty.n_successful)
 print(uncertainty.standard_errors)
-print(uncertainty.intervals)  # shape (6 * num_components, 2); 95% percentile intervals
+print(uncertainty.median)  # bootstrap parameter medians
+print(uncertainty.model_phase_intervals)  # per-component lower, median, upper at r=0.5
+print(uncertainty.model_phase_standard_errors)  # radians
+print(uncertainty.intervals)  # shape (6 * num_components, 3); lower, median, upper
 print(uncertainty.warnings)
 ```
 
