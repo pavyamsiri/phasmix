@@ -178,19 +178,22 @@ def _main() -> None:
                 iterations,
             )
             if workers == 4:
-                for index, (estimate, error, interval) in enumerate(
+                for index, (_, error, interval) in enumerate(
                     zip(uncertainty.reference, uncertainty.standard_errors, uncertainty.intervals, strict=True)
                 ):
                     component, parameter = divmod(index, len(parameter_names))
+                    (median_param, error_bar) = round_value_with_error(interval[1], 1.96 * error)
+                    (lower_param, _) = round_value_with_error(interval[0], 1.96 * error)
+                    (upper_param, _) = round_value_with_error(interval[2], 1.96 * error)
                     log.info(
-                        "%s component %d %s: %.6g +/- %.6g [%.6g, %.6g]",
+                        "%s component %d %s: %s +/- %s [%s, %s]",
                         name,
                         component + 1,
                         parameter_names[parameter],
-                        interval[1],
-                        error,
-                        interval[0],
-                        interval[2],
+                        median_param,
+                        error_bar,
+                        lower_param,
+                        upper_param,
                     )
                 for warning in uncertainty.warnings:
                     log.info("%s bootstrap note: %s", name, warning)
@@ -226,6 +229,31 @@ def _main() -> None:
     fig.tight_layout()
     fig.savefig("./out.png")  # pyright: ignore[reportUnknownMemberType]
     plt.close(fig)
+
+
+def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1) -> tuple[str, str]:
+    """Round a value with an associated error to the errors significant figures.
+
+    Parameters
+    ----------
+    value : float
+        The value to round.
+    error : float
+        The value's error to also round.
+    num_sig_figs : int
+        The number of significant figures to round the error to.
+
+    Returns
+    -------
+    rounded_value : float
+        The rounded value.
+    rounded_error : float
+        The rounded error.
+
+    """
+    order = np.floor(np.log10(error))
+    places = max(int(num_sig_figs - order - 1), 0)
+    return (np.format_float_positional(value, precision=places), np.format_float_positional(error, precision=places))
 
 
 if __name__ == "__main__":
