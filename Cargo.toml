@@ -27,6 +27,7 @@ rayon = "1.10.0"
 sobol = "1.0.2"
 sobol_burley = "0.5.0"
 statrs = "0.18.0"
+thiserror = "2.0.21"
 wide = "1.4.0"
 
 phasmix_core = { path = "crates/phasmix_core" }

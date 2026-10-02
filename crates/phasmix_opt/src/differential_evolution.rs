@@ -1,18 +1,13 @@
 extern crate alloc;
 
+use crate::core::OptimizationResult;
 use basin::CostFunction;
 #[cfg(test)]
 use core::convert;
-use core::{array, error::Error, fmt};
+use core::{array, fmt};
 use rand::{RngExt as _, distr::Uniform, seq::index::sample};
 use rayon::prelude::*;
-
-#[derive(Debug)]
-pub struct OptimizationResult {
-    pub params: Vec<f64>,
-    pub cost: f64,
-    pub nfev: u64,
-}
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct DifferentialEvolution {
@@ -23,7 +18,7 @@ pub struct DifferentialEvolution {
 }
 
 /// A failure in the objective or the differential evolution optimizer.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum OptimizationError<E> {
     /// An objective evaluation failed, including during local polishing.
     CostFunction(E),
@@ -32,67 +27,32 @@ pub enum OptimizationError<E> {
 }
 
 /// Errors specific to differential evolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DifferentialEvolutionError {
     /// `rand/1` requires at least four population members.
+    #[error("rand/1 requires at least four population members.")]
     PopulationTooSmall { size: usize },
     /// At least one parameter is required.
+    #[error("At least one parameter is required.")]
     EmptyBounds,
     /// A bound is non-finite, reversed, or cannot be sampled safely.
+    #[error("A bound is non-finite, reversed or can not be sampled safely.")]
     InvalidBound { index: usize },
     /// Polishing must use the same bounds as the global search.
+    #[error("Inconsistent box constraints.")]
     InconsistentBoxConstraints,
     /// Tolerances must be finite and nonnegative.
+    #[error("Invalid tolerance.")]
     InvalidTolerance,
     /// The evaluation count cannot be represented as a `u64`.
+    #[error("Evaluation count overflow.")]
     EvaluationCountOverflow,
     /// No population member is available for selection.
+    #[error("No population member is available for selection.")]
     EmptyPopulation,
     /// Warm start has the wrong length, non-finite values, or violates bounds.
+    #[error("Warm start has the wrong length, non-finite values or violates bounds.")]
     InvalidWarmStart,
-}
-
-impl fmt::Display for DifferentialEvolutionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PopulationTooSmall { size } => {
-                write!(f, "population size {size} is smaller than four")
-            }
-            Self::EmptyBounds => f.write_str("at least one parameter bound is required"),
-            Self::InvalidBound { index } => {
-                write!(f, "invalid or unsampleable bound at index {index}")
-            }
-            Self::InconsistentBoxConstraints => {
-                f.write_str("objective box constraints do not match the search bounds")
-            }
-            Self::InvalidTolerance => f.write_str("tolerances must be finite and nonnegative"),
-            Self::EvaluationCountOverflow => f.write_str("function evaluation count exceeds u64"),
-            Self::InvalidWarmStart => {
-                f.write_str("warm start must match bounds and contain finite in-bounds values")
-            }
-            Self::EmptyPopulation => f.write_str("cannot select from an empty population"),
-        }
-    }
-}
-
-impl Error for DifferentialEvolutionError {}
-
-impl<E: fmt::Display> fmt::Display for OptimizationError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CostFunction(error) => write!(f, "objective evaluation failed: {error}"),
-            Self::DifferentialEvolution(error) => error.fmt(f),
-        }
-    }
-}
-
-impl<E: Error + 'static> Error for OptimizationError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::CostFunction(error) => Some(error),
-            Self::DifferentialEvolution(error) => Some(error),
-        }
-    }
 }
 
 impl<E> From<DifferentialEvolutionError> for OptimizationError<E> {

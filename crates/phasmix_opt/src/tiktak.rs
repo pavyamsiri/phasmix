@@ -1,18 +1,12 @@
 extern crate alloc;
 
+use crate::core::OptimizationResult;
 use alloc::collections::BinaryHeap;
 use argmin_testfunctions::rosenbrock;
 use basin::CostFunction;
 use core::{cmp, convert, fmt};
 use phasmix_core::usize_to_f64;
 use rayon::prelude::*;
-
-#[derive(Debug)]
-pub struct OptimizationResult {
-    pub params: Vec<f64>,
-    pub cost: f64,
-    pub nfev: u64,
-}
 
 struct OrderedPoint {
     cost: f64,
