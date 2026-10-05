@@ -1,40 +1,13 @@
 extern crate alloc;
 
 use crate::core::OptimizationResult;
+use crate::core::OrderedPoint;
 use alloc::collections::BinaryHeap;
 use argmin_testfunctions::rosenbrock;
 use basin::CostFunction;
-use core::{cmp, convert, fmt};
+use core::{convert, fmt};
 use phasmix_core::usize_to_f64;
 use rayon::prelude::*;
-
-struct OrderedPoint {
-    cost: f64,
-    point: Vec<f64>,
-}
-
-impl PartialEq for OrderedPoint {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-    }
-}
-
-impl Eq for OrderedPoint {}
-
-impl PartialOrd for OrderedPoint {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedPoint {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        // Max-heap by cost — so the *worst* kept point is always at the top
-        self.cost
-            .partial_cmp(&other.cost)
-            .unwrap_or(cmp::Ordering::Equal)
-    }
-}
 
 pub struct TikTak<const N: usize> {
     pub num_samples: usize,
