@@ -8,7 +8,11 @@ use core::cmp;
 use core::convert;
 use core::default;
 use core::fmt;
-use rand::{Rng, RngExt as _, SeedableRng as _, rngs::StdRng, seq::index::sample};
+use rand::{
+    Rng, RngExt as _, SeedableRng as _,
+    rngs::StdRng,
+    seq::{SliceRandom as _, index::sample},
+};
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -308,9 +312,11 @@ impl BoundaryStrategy {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub enum InitializationStrategy {
+    /// Sample once per equally sized stratum in each parameter, independently
+    /// shuffling the strata across population members for each parameter.
+    #[default]
     LatinHyperCube,
     Sobol,
-    #[default]
     Independent,
 }
 
@@ -322,7 +328,30 @@ impl InitializationStrategy {
         rng: &mut impl Rng,
     ) -> Vec<Vec<f64>> {
         match self {
-            InitializationStrategy::LatinHyperCube => todo!(),
+            InitializationStrategy::LatinHyperCube => {
+                let mut population = vec![vec![0.0; num_parameters]; pop_size];
+                if pop_size == 0 {
+                    return population;
+                }
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "population size is used to divide the unit interval into strata"
+                )]
+                let stratum_width = 1.0 / pop_size as f64;
+                let mut strata: Vec<_> = (0..pop_size).collect();
+                for parameter in 0..num_parameters {
+                    strata.shuffle(rng);
+                    for (member, &stratum) in population.iter_mut().zip(&strata) {
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "stratum index is used only to locate a sample within the unit interval"
+                        )]
+                        let sample = (stratum as f64 + rng.random::<f64>()) * stratum_width;
+                        member[parameter] = sample;
+                    }
+                }
+                population
+            }
             InitializationStrategy::Sobol => todo!(),
             InitializationStrategy::Independent => (0..pop_size)
                 .map(|_| {
@@ -751,6 +780,84 @@ impl DifferentialEvolution {
 
         // Step 5: Polish best result
         Self::polish(cost_func, best_member, best_cost, nfev)
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    #[test]
+    fn latin_hypercube_covers_each_stratum_in_every_parameter() {
+        let mut rng = StdRng::seed_from_u64(883_331);
+        let population =
+            InitializationStrategy::LatinHyperCube.generate_initial_population(16, 4, &mut rng);
+        assert_eq!(population.len(), 16, "population size must be preserved");
+        assert!(
+            population.iter().all(|point| point.len() == 4),
+            "every point must have the requested dimension"
+        );
+        let mut assignments = Vec::new();
+        for parameter in 0..4 {
+            let mut counts = [0; 16];
+            let strata: Vec<_> = population
+                .iter()
+                .map(|point| {
+                    let value = point[parameter];
+                    assert!(
+                        (0.0..1.0).contains(&value),
+                        "samples must lie in the unit interval"
+                    );
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "sample is in [0, 1), so its stratum index is in 0..16"
+                    )]
+                    let stratum = (value * 16.0) as usize;
+                    counts[stratum] += 1;
+                    stratum
+                })
+                .collect();
+            assert_eq!(
+                counts, [1; 16],
+                "each parameter must sample every stratum once"
+            );
+            assignments.push(strata);
+        }
+        assert!(
+            assignments.windows(2).all(|pair| pair[0] != pair[1]),
+            "parameters must shuffle strata independently for this seed"
+        );
+        let repeated = InitializationStrategy::LatinHyperCube.generate_initial_population(
+            16,
+            4,
+            &mut StdRng::seed_from_u64(883_331),
+        );
+        assert_eq!(
+            population, repeated,
+            "seeded initialization must be reproducible"
+        );
+    }
+
+    #[test]
+    fn latin_hypercube_supports_empty_and_single_member_populations() {
+        let mut rng = StdRng::seed_from_u64(1);
+        assert!(
+            InitializationStrategy::LatinHyperCube
+                .generate_initial_population(0, 2, &mut rng)
+                .is_empty(),
+            "empty population must stay empty"
+        );
+        let population =
+            InitializationStrategy::LatinHyperCube.generate_initial_population(1, 2, &mut rng);
+        assert_eq!(
+            population.len(),
+            1,
+            "single-member population must be preserved"
+        );
+        assert!(
+            population[0].iter().all(|value| (0.0..1.0).contains(value)),
+            "single-member samples must lie in the unit interval"
+        );
     }
 }
 
