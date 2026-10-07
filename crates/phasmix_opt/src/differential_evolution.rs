@@ -2,16 +2,18 @@ extern crate alloc;
 
 use crate::core::{OptimizationError, OptimizationResult};
 use basin::CostFunction;
+use core::array;
+use core::cmp;
 #[cfg(test)]
 use core::convert;
 use core::default;
-use core::{array, fmt};
+use core::fmt;
 use rand::{Rng, RngExt as _, SeedableRng as _, rngs::StdRng, seq::index::sample};
 use rayon::prelude::*;
 use thiserror::Error;
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum MutationStrategy {
     /// The mutant vector is the current best vector plus one random difference vector.
     #[default]
@@ -28,6 +30,141 @@ pub enum MutationStrategy {
     /// The mutant vector is the current target vector shifted towards the current best
     /// vector and perturbed by one random difference vector.
     CurrentToBest,
+}
+
+impl MutationStrategy {
+    fn generate_mutant(
+        self,
+        population: &[Vec<f64>],
+        mutation_factor: f64,
+        target_index: usize,
+        best_index: usize,
+        rng: &mut impl Rng,
+    ) -> Vec<f64> {
+        assert!(
+            (0..population.len()).contains(&target_index),
+            "target index must be within bounds."
+        );
+        assert!(
+            (0..population.len()).contains(&best_index),
+            "best index must be within bounds."
+        );
+
+        let excluding = &match target_index.cmp(&best_index) {
+            cmp::Ordering::Less => [target_index, best_index],
+            cmp::Ordering::Equal => [target_index, population.len()],
+            cmp::Ordering::Greater => [best_index, target_index],
+        };
+
+        match self {
+            MutationStrategy::Best1 => {
+                let [r1, r2] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[best_index].iter(),
+                    population[r1].iter(),
+                    population[r2].iter()
+                )
+                .map(|(best_val, r1_val, r2_val)| best_val + mutation_factor * (r1_val - r2_val))
+                .collect()
+            }
+
+            MutationStrategy::Best2 => {
+                let [r1, r2, r3, r4] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[best_index].iter(),
+                    population[r1].iter(),
+                    population[r2].iter(),
+                    population[r3].iter(),
+                    population[r4].iter()
+                )
+                .map(|(best_val, r1_val, r2_val, r3_val, r4_val)| {
+                    best_val + mutation_factor * (r1_val + r2_val - r3_val - r4_val)
+                })
+                .collect()
+            }
+            MutationStrategy::Rand1 => {
+                let [r0, r1, r2] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[r0].iter(),
+                    population[r1].iter(),
+                    population[r2].iter()
+                )
+                .map(|(r0_val, r1_val, r2_val)| r0_val + mutation_factor * (r1_val - r2_val))
+                .collect()
+            }
+            MutationStrategy::Rand2 => {
+                let [r0, r1, r2, r3, r4] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[r0].iter(),
+                    population[r1].iter(),
+                    population[r2].iter(),
+                    population[r3].iter(),
+                    population[r4].iter()
+                )
+                .map(|(r0_val, r1_val, r2_val, r3_val, r4_val)| {
+                    r0_val + mutation_factor * (r1_val + r2_val - r3_val - r4_val)
+                })
+                .collect()
+            }
+            MutationStrategy::RandToBest => {
+                let [r0, r1, r2, r3] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[r0].iter(),
+                    population[r1].iter(),
+                    population[r2].iter(),
+                    population[r3].iter(),
+                    population[best_index].iter()
+                )
+                .map(|(r0_val, r1_val, r2_val, r3_val, best_val)| {
+                    r0_val + mutation_factor * (best_val + r1_val - r2_val - r3_val)
+                })
+                .collect()
+            }
+            MutationStrategy::CurrentToBest => {
+                let [r1, r2, r3] = Self::sample_indices(population.len(), excluding, rng);
+                itertools::izip!(
+                    population[target_index].iter(),
+                    population[r1].iter(),
+                    population[r2].iter(),
+                    population[r3].iter(),
+                    population[best_index].iter()
+                )
+                .map(|(target_val, r1_val, r2_val, r3_val, best_val)| {
+                    target_val + mutation_factor * (best_val + r1_val - r2_val - r3_val)
+                })
+                .collect()
+            }
+        }
+    }
+
+    fn sample_indices<const N: usize>(
+        num_population: usize,
+        excluding: &[usize],
+        rng: &mut impl Rng,
+    ) -> [usize; N] {
+        debug_assert!(excluding.is_sorted(), "`excluding` must be sorted.");
+        debug_assert!(
+            excluding.windows(2).all(|w| w[0] != w[1]),
+            "`excluding` must contain no duplicates."
+        );
+        let num_excluded = excluding
+            .iter()
+            .take_while(|&&idx| idx < num_population)
+            .count();
+
+        let mut sampled = sample(rng, num_population - num_excluded, N).into_iter();
+
+        array::from_fn(|_| {
+            let mut idx = sampled.next().unwrap();
+
+            for &excluded_idx in excluding {
+                if idx >= excluded_idx {
+                    idx += 1;
+                }
+            }
+            idx
+        })
+    }
 }
 
 #[non_exhaustive]
@@ -432,8 +569,13 @@ impl DifferentialEvolution {
 
         // Step 2: Create donor vectors
         // v[i] = z[a] + F * (z[b] - z[c]) where a, b and c are not equal to i
-        let weight = self.mutation_factor;
         let crossover = self.crossover_rate.into();
+        let mut best_index = costs
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
 
         // Iterate over generations
         let mut trials = Vec::with_capacity(population_size);
@@ -446,25 +588,16 @@ impl DifferentialEvolution {
             trials.clear();
 
             // Generate trials in order, without changing any parent this generation.
-            for i in 0..population_size {
-                let indices = sample(&mut rng, population_size - 1, 3);
-                // Sampling three indices is safe after validating pop_size >= 4.
-                let [a_index, b_index, c_index] = array::from_fn(|position| {
-                    let index = indices.index(position);
-                    if index >= i { index + 1 } else { index }
-                });
-                let donor: Vec<_> = population[a_index]
-                    .iter()
-                    .enumerate()
-                    .map(|(param_index, value)| {
-                        value
-                            + weight
-                                * (population[b_index][param_index]
-                                    - population[c_index][param_index])
-                    })
-                    .collect();
+            for target_index in 0..population_size {
+                let donor = self.mutation.generate_mutant(
+                    &population,
+                    self.mutation_factor,
+                    target_index,
+                    best_index,
+                    &mut rng,
+                );
                 let forced = rng.random_range(0..num_parameters);
-                let new_pop: Vec<_> = population[i]
+                let new_pop: Vec<_> = population[target_index]
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
