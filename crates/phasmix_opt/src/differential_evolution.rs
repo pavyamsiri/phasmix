@@ -262,14 +262,7 @@ impl DifferentialEvolution {
             .map(|parameters| {
                 let cost = replace_nan(
                     cost_func
-                        .cost(
-                            &parameters
-                                .iter()
-                                .zip(cost_func.lower().iter())
-                                .zip(cost_func.upper().iter())
-                                .map(|((val, lower), upper)| lower + val * (upper - lower))
-                                .collect(),
-                        )
+                        .cost(parameters)
                         .map_err(OptimizationError::CostFunction)?,
                 );
                 Ok(cost)
@@ -279,19 +272,13 @@ impl DifferentialEvolution {
 
     fn polish<C>(
         cost_func: &C,
-        best_member: &[f64],
+        best_member: Vec<f64>,
         best_cost: f64,
         nfev: u64,
     ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64> + Clone + basin::BoxConstraints,
     {
-        let best_member: Vec<_> = best_member
-            .iter()
-            .zip(cost_func.lower())
-            .zip(cost_func.upper())
-            .map(|((val, lower), upper)| lower + val * (upper - lower))
-            .collect();
         let polished = basin::Executor::new(
             cost_func.clone(),
             basin::NelderMead::standard().projected(),
@@ -414,26 +401,25 @@ impl DifferentialEvolution {
         let mut rng =
             seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
         // Step 1: Create initial population
-        let mut population = self.initializer.generate_initial_population(
-            population_size - usize::from(warm_start.is_some()),
-            num_parameters,
-            &mut rng,
-        );
-        if let Some(point) = warm_start {
-            population.push(
-                point
-                    .iter()
+        let mut population: Vec<Vec<f64>> = self
+            .initializer
+            .generate_initial_population(
+                population_size - usize::from(warm_start.is_some()),
+                num_parameters,
+                &mut rng,
+            )
+            .into_iter()
+            .map(|params| {
+                params
+                    .into_iter()
                     .zip(lower_bounds.iter())
                     .zip(upper_bounds.iter())
-                    .map(|((val, lower), upper)| {
-                        if lower == upper {
-                            0.0
-                        } else {
-                            (val - lower) / (upper - lower)
-                        }
-                    })
-                    .collect(),
-            );
+                    .map(|((val, lower), upper)| lower + val * (upper - lower))
+                    .collect()
+            })
+            .collect();
+        if let Some(point) = warm_start {
+            population.push(point.to_vec());
         }
 
         let mut costs = Self::evaluate_population(cost_func, &population)?;
@@ -484,7 +470,8 @@ impl DifferentialEvolution {
                     .map(|(param_index, value)| {
                         if param_index == forced || rng.random::<f64>() < crossover {
                             // TODO: Handle boundary here
-                            donor[param_index].clamp(0.0, 1.0)
+                            donor[param_index]
+                                .clamp(lower_bounds[param_index], upper_bounds[param_index])
                         } else {
                             *value
                         }
@@ -515,7 +502,7 @@ impl DifferentialEvolution {
 
         // Step 4: Select best cost
         let (best_member, best_cost) = population
-            .iter()
+            .into_iter()
             .zip(costs)
             .min_by(|(_, left), (_, right)| left.total_cmp(right))
             .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
@@ -682,7 +669,7 @@ mod warm_start_tests {
             evaluations: Arc::default(),
         };
         // Force the fallback independently of the local optimizer's convergence.
-        let result = DifferentialEvolution::polish(&objective, &[0.5], -1.0, 0).unwrap();
+        let result = DifferentialEvolution::polish(&objective, vec![15.0], -1.0, 0).unwrap();
         assert_eq!(result.params, vec![15.0]);
         assert_eq!(result.cost, -1.0);
     }
