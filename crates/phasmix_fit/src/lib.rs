@@ -18,6 +18,7 @@ use phasmix_core::{PSpiralComponent, PSpiralModel, Winding, ln_likelihood};
 use phasmix_opt::core::OptimizationError;
 use phasmix_opt::core::OptimizationResult;
 use phasmix_opt::differential_evolution::DifferentialEvolution;
+use phasmix_opt::differential_evolution::DifferentialEvolutionConfig;
 use phasmix_opt::differential_evolution::DifferentialEvolutionError;
 use phasmix_opt::tiktak::{DynamicTikTak, TikTak};
 use wide::CmpLe as _;
@@ -855,13 +856,17 @@ impl<const N: usize> Clone for GlobalOptimizer<N> {
 impl<const N: usize> GlobalOptimizer<N> {
     /// Construct a differential evolution optimizer with 15 members per parameter.
     #[must_use]
-    pub const fn differential_evolution() -> Self {
-        Self::DifferentialEvolution(DifferentialEvolution {
-            pop_size: 15 * N,
-            max_iter: 100,
-            atol: 0.0,
-            rtol: 0.01,
-        })
+    pub fn differential_evolution() -> Self {
+        Self::DifferentialEvolution(
+            DifferentialEvolution::new(DifferentialEvolutionConfig {
+                pop_size: 15,
+                max_iter: 100,
+                atol: 0.0,
+                rtol: 0.01,
+                ..Default::default()
+            })
+            .expect("TODO: deal with this later"),
+        )
     }
 
     fn minimize<C>(
@@ -888,7 +893,7 @@ impl<const N: usize> GlobalOptimizer<N> {
                 .map(FitOptimizationResult::from_global)
                 .map_err(OptimizationError::CostFunction),
             Self::DifferentialEvolution(optimizer) => {
-                let result = optimizer.minimize_with_warm_start(objective, bounds, warm_start)?;
+                let result = optimizer.minimize_with_warm_start(objective, None, warm_start)?;
                 Ok(FitOptimizationResult::from_global(result))
             }
         }

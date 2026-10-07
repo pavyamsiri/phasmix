@@ -70,7 +70,7 @@ where
     for (index, &(lower, upper)) in bounds.iter().enumerate() {
         if !lower.is_finite() || !upper.is_finite() || !(upper - lower).is_finite() || lower > upper
         {
-            return Err(DifferentialEvolutionError::InvalidBound { index }.into());
+            return Err(DifferentialEvolutionError::InvalidBounds.into());
         }
     }
     let free_indices: Vec<_> = bounds

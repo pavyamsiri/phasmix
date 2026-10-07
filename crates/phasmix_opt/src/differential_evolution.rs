@@ -4,46 +4,223 @@ use crate::core::{OptimizationError, OptimizationResult};
 use basin::CostFunction;
 #[cfg(test)]
 use core::convert;
+use core::default;
 use core::{array, fmt};
-use rand::{RngExt as _, distr::Uniform, seq::index::sample};
+use rand::{Rng, RngExt as _, SeedableRng as _, rngs::StdRng, seq::index::sample};
 use rayon::prelude::*;
 use thiserror::Error;
 
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub enum MutationStrategy {
+    /// The mutant vector is the current best vector plus one random difference vector.
+    #[default]
+    Best1,
+    /// The mutant vector is the current best vector plus two random difference vectors.
+    Best2,
+    /// The mutant vector is a random population vector plus one random difference vector.
+    Rand1,
+    /// The mutant vector is a random population vector plus two random difference vectors.
+    Rand2,
+    /// The mutant vector is a random population vector shifted towards the current best
+    /// vector and perturbed by one random difference vector.
+    RandToBest,
+    /// The mutant vector is the current target vector shifted towards the current best
+    /// vector and perturbed by one random difference vector.
+    CurrentToBest,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub enum CrossoverStrategy {
+    /// Each parameter is selected between the mutant and the target independently according to the crossover rate.
+    /// One parameter is guaranteed to be from the mutant.
+    #[default]
+    Binomial,
+    // NOTE: Not implemented yet.
+    // A random starting parameter is selected from the mutant, then consecutive parameters are taken from the mutant
+    // while the crossover condition succeeds. The parameter array is periodic such that there are no issues with going
+    // out of bounds. The remaining parameters are taken from the target.
+    // Exponential,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub enum BoundaryStrategy {
+    /// If the trial vector is out of bounds, it is assigned infinite cost and therefore rejected in favour of the target
+    /// vector. Target vectors are guaranteed to be within bounds.
+    #[default]
+    Reject,
+    // NOTE: Not implemented yet.
+    // If the trial vector is out of bounds, each out of bounds parameter is replaced by a newly sampled in-bounds parameter.
+    // Comparison with the target vector then proceeds as normal.
+    // Resample,
+    // If the trial vector is out of bounds, each out-of-bounds parameter is reflected across its violated boundary until
+    // it lies within bounds.
+    // Comparison with the target vector then proceeds as normal.
+    // Reflect,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default)]
+pub enum InitializationStrategy {
+    LatinHyperCube,
+    Sobol,
+    #[default]
+    Independent,
+}
+
+impl InitializationStrategy {
+    fn generate_initial_population(
+        self,
+        pop_size: usize,
+        num_parameters: usize,
+        rng: &mut impl Rng,
+    ) -> Vec<Vec<f64>> {
+        match self {
+            InitializationStrategy::LatinHyperCube => todo!(),
+            InitializationStrategy::Sobol => todo!(),
+            InitializationStrategy::Independent => (0..pop_size)
+                .map(|_| {
+                    (0..num_parameters)
+                        .map(|_| rng.random_range(0.0..=1.0))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct DifferentialEvolution {
+pub struct DifferentialEvolutionConfig {
     pub pop_size: usize,
     pub max_iter: usize,
+    pub crossover_rate: f32,
+    pub mutation_factor: f64,
     pub atol: f64,
     pub rtol: f64,
+    pub mutation: MutationStrategy,
+    pub crossover: CrossoverStrategy,
+    pub boundary: BoundaryStrategy,
+    pub initializer: InitializationStrategy,
+}
+
+impl default::Default for DifferentialEvolutionConfig {
+    fn default() -> Self {
+        Self {
+            pop_size: 4,
+            max_iter: 10,
+            crossover_rate: 0.7,
+            mutation_factor: 0.5,
+            atol: 0.0,
+            rtol: 0.01,
+            mutation: MutationStrategy::default(),
+            crossover: CrossoverStrategy::default(),
+            boundary: BoundaryStrategy::default(),
+            initializer: InitializationStrategy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DifferentialEvolution {
+    pop_size: usize,
+    max_iter: usize,
+    crossover_rate: f32,
+    mutation_factor: f64,
+    atol: f64,
+    rtol: f64,
+    mutation: MutationStrategy,
+    crossover: CrossoverStrategy,
+    boundary: BoundaryStrategy,
+    initializer: InitializationStrategy,
+}
+
+impl DifferentialEvolution {
+    /// Initialize a new differential evolution optimizer given a configuration.
+    ///
+    /// # Errors
+    /// Initialization will fail if any of the configuration is invalid:
+    /// - `pop_size` is too small; less than 4. Certain strategies requires a minimum population size.
+    /// - `atol` or `rtol` are invalid tolerances; non-finite or negative.
+    /// - `crossover_rate` is invalid; should be a probability in the range [0.0, 1.0].
+    /// - `mutation_factor` is invalid; non-finite or negative.
+    pub fn new(
+        config: DifferentialEvolutionConfig,
+    ) -> Result<DifferentialEvolution, DifferentialEvolutionInitializationError> {
+        if config.pop_size < 4 {
+            return Err(
+                DifferentialEvolutionInitializationError::PopulationTooSmall {
+                    size: config.pop_size as u8,
+                },
+            );
+        }
+
+        if !config.atol.is_finite() || config.atol < 0.0 {
+            return Err(DifferentialEvolutionInitializationError::InvalidAbsoluteTolerance);
+        }
+
+        if !config.rtol.is_finite() || config.rtol < 0.0 {
+            return Err(DifferentialEvolutionInitializationError::InvalidRelativeTolerance);
+        }
+
+        if !config.crossover_rate.is_finite() || !(0.0..=1.0).contains(&config.crossover_rate) {
+            return Err(DifferentialEvolutionInitializationError::InvalidCrossoverRate);
+        }
+
+        if !config.mutation_factor.is_finite() || config.mutation_factor < 0.0 {
+            return Err(DifferentialEvolutionInitializationError::InvalidMutationFactor);
+        }
+
+        Ok(Self {
+            pop_size: config.pop_size,
+            max_iter: config.max_iter,
+            crossover_rate: config.crossover_rate,
+            mutation_factor: config.mutation_factor,
+            atol: config.atol,
+            rtol: config.rtol,
+            mutation: config.mutation,
+            crossover: config.crossover,
+            boundary: config.boundary,
+            initializer: config.initializer,
+        })
+    }
+}
+
+/// Errors when creating a differential evolution optimizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DifferentialEvolutionInitializationError {
+    /// The optimizer only supports `popsize` greater than or equal to four.
+    /// This is so that all strategies can be supported.
+    #[error("Differential evolution requires at least four population members.")]
+    PopulationTooSmall { size: u8 },
+    /// Absolute tolerance must be finite and nonnegative.
+    #[error("Absolute tolerance must be finite and nonnegative.")]
+    InvalidAbsoluteTolerance,
+    /// Relative tolerance must be finite and nonnegative.
+    #[error("Relative tolerance must be finite and nonnegative.")]
+    InvalidRelativeTolerance,
+    /// Crossover rate must be a probability i.e. in the range [0, 1].
+    #[error("The crossover rate must be a probability within the range [0, 1].")]
+    InvalidCrossoverRate,
+    /// Mutation factor must be finite and nonnegative.
+    #[error("The mutation factor must be finite and nonnegative.")]
+    InvalidMutationFactor,
 }
 
 /// Errors specific to differential evolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DifferentialEvolutionError {
-    /// `rand/1` requires at least four population members.
-    #[error("rand/1 requires at least four population members.")]
-    PopulationTooSmall { size: usize },
-    /// At least one parameter is required.
-    #[error("At least one parameter is required.")]
-    EmptyBounds,
-    /// A bound is non-finite, reversed, or cannot be sampled safely.
-    #[error("A bound is non-finite, reversed or can not be sampled safely.")]
-    InvalidBound { index: usize },
-    /// Polishing must use the same bounds as the global search.
-    #[error("Inconsistent box constraints.")]
-    InconsistentBoxConstraints,
-    /// Tolerances must be finite and nonnegative.
-    #[error("Invalid tolerance.")]
-    InvalidTolerance,
-    /// The evaluation count cannot be represented as a `u64`.
-    #[error("Evaluation count overflow.")]
-    EvaluationCountOverflow,
-    /// No population member is available for selection.
-    #[error("No population member is available for selection.")]
-    EmptyPopulation,
-    /// Warm start has the wrong length, non-finite values, or violates bounds.
-    #[error("Warm start has the wrong length, non-finite values or violates bounds.")]
+    #[error("Bounds are invalid in some way.")]
+    InvalidBounds,
+    #[error("Warm start was invalid.")]
     InvalidWarmStart,
+    #[error("The evaluation count has overflowed. This is not realistically possible.")]
+    EvaluationCountOverflow,
+    #[error(
+        "The population was empty. This is not possible and can only happen due to programmer error."
+    )]
+    EmptyPopulation,
 }
 
 impl<C> From<DifferentialEvolutionError> for OptimizationError<C, DifferentialEvolutionError> {
@@ -52,57 +229,16 @@ impl<C> From<DifferentialEvolutionError> for OptimizationError<C, DifferentialEv
     }
 }
 
-type EvaluatedPopulation = Vec<(Vec<f64>, f64)>;
-
 const fn replace_nan(cost: f64) -> f64 {
     if cost.is_nan() { f64::INFINITY } else { cost }
 }
 
 impl DifferentialEvolution {
-    fn validate<C>(
-        &self,
-        cost_func: &C,
-        bounds: &[(f64, f64)],
-    ) -> Result<(), DifferentialEvolutionError>
-    where
-        C: basin::BoxConstraints<Param = Vec<f64>>,
-    {
-        if self.pop_size < 4 {
-            return Err(DifferentialEvolutionError::PopulationTooSmall {
-                size: self.pop_size,
-            });
-        }
-        if bounds.is_empty() {
-            return Err(DifferentialEvolutionError::EmptyBounds);
-        }
-        if !self.atol.is_finite() || self.atol < 0.0 || !self.rtol.is_finite() || self.rtol < 0.0 {
-            return Err(DifferentialEvolutionError::InvalidTolerance);
-        }
-        for (index, &(lower, upper)) in bounds.iter().enumerate() {
-            if !lower.is_finite() || !upper.is_finite() || lower > upper {
-                return Err(DifferentialEvolutionError::InvalidBound { index });
-            }
-        }
-        #[expect(
-            clippy::float_cmp,
-            reason = "global search and polishing must use identical bounds"
-        )]
-        let matching_bounds = cost_func.lower().len() == bounds.len()
-            && cost_func.upper().len() == bounds.len()
-            && bounds.iter().enumerate().all(|(index, &(lower, upper))| {
-                cost_func.lower()[index] == lower && cost_func.upper()[index] == upper
-            });
-        if !matching_bounds {
-            return Err(DifferentialEvolutionError::InconsistentBoxConstraints);
-        }
-        Ok(())
-    }
-
-    fn converged(&self, population: &[(Vec<f64>, f64)], population_size: f64) -> bool {
-        let mean = population.iter().map(|(_, cost)| *cost).sum::<f64>() / population_size;
-        let variance = population
+    fn converged(&self, costs: &[f64], population_size: f64) -> bool {
+        let mean = costs.iter().sum::<f64>() / population_size;
+        let variance = costs
             .iter()
-            .map(|(_, cost)| {
+            .map(|cost| {
                 let residual = cost - mean;
                 residual * residual
             })
@@ -114,21 +250,28 @@ impl DifferentialEvolution {
 
     fn evaluate_population<C>(
         cost_func: &C,
-        population: Vec<Vec<f64>>,
-    ) -> Result<EvaluatedPopulation, OptimizationError<C::Error, DifferentialEvolutionError>>
+        population: &[Vec<f64>],
+    ) -> Result<Vec<f64>, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
-        C: CostFunction<Param = Vec<f64>, Output = f64> + Sync,
+        C: CostFunction<Param = Vec<f64>, Output = f64> + Sync + basin::BoxConstraints,
         C::Error: Send,
     {
         population
-            .into_par_iter()
+            .par_iter()
             .map(|parameters| {
                 let cost = replace_nan(
                     cost_func
-                        .cost(&parameters)
+                        .cost(
+                            &parameters
+                                .iter()
+                                .zip(cost_func.lower().iter())
+                                .zip(cost_func.upper().iter())
+                                .map(|((val, lower), upper)| lower + val * (upper - lower))
+                                .collect(),
+                        )
                         .map_err(OptimizationError::CostFunction)?,
                 );
-                Ok((parameters, cost))
+                Ok(cost)
             })
             .collect()
     }
@@ -184,7 +327,7 @@ impl DifferentialEvolution {
     pub fn minimize<C>(
         &self,
         cost_func: &C,
-        bounds: &[(f64, f64)],
+        seed: Option<u64>,
     ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
@@ -195,7 +338,7 @@ impl DifferentialEvolution {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
-        self.minimize_with_warm_start(cost_func, bounds, None)
+        self.minimize_with_warm_start(cost_func, seed, None)
     }
 
     /// Append a warm start to the configured random population.
@@ -205,7 +348,7 @@ impl DifferentialEvolution {
     pub fn minimize_with_warm_start<C>(
         &self,
         cost_func: &C,
-        bounds: &[(f64, f64)],
+        seed: Option<u64>,
         warm_start: Option<&[f64]>,
     ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
@@ -217,66 +360,83 @@ impl DifferentialEvolution {
             + basin::BoxConstraints,
         C::Error: Send + fmt::Display,
     {
-        self.validate(cost_func, bounds)?;
+        // Check that bounds are valid: finite
+        let lower_bounds = cost_func.lower();
+        let upper_bounds = cost_func.upper();
+
+        // Upper and lower bounds must be the same shape.
+        if lower_bounds.len() != upper_bounds.len() {
+            return Err(DifferentialEvolutionError::InvalidBounds.into());
+        }
+        let num_parameters = lower_bounds.len();
+
+        // Lower bound must be lower than the upper bound and both must be finite.
+        for (lb, ub) in lower_bounds.iter().zip(upper_bounds.iter()) {
+            if !lb.is_finite() || !ub.is_finite() {
+                return Err(DifferentialEvolutionError::InvalidBounds.into());
+            }
+            if lb > ub {
+                return Err(DifferentialEvolutionError::InvalidBounds.into());
+            }
+        }
+
+        // Check warm start
         if let Some(point) = warm_start
-            && (point.len() != bounds.len()
+            && (point.len() != num_parameters
                 || !point
                     .iter()
-                    .zip(bounds)
-                    .all(|(&value, &(lb, ub))| value.is_finite() && value >= lb && value <= ub))
+                    .zip(lower_bounds.iter())
+                    .zip(upper_bounds.iter())
+                    .all(|((value, lb), ub)| value >= lb && value <= ub))
         {
             return Err(DifferentialEvolutionError::InvalidWarmStart.into());
         }
+
         let population_size = self
             .pop_size
             .checked_add(usize::from(warm_start.is_some()))
             .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+
         let evaluations_per_generation = u64::try_from(population_size)
             .map_err(|_error| DifferentialEvolutionError::EvaluationCountOverflow)?;
+
         let mut nfev = evaluations_per_generation;
 
+        let mut rng =
+            seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
+        let num_members = self.pop_size * num_parameters;
         // Step 1: Create initial population
-        let mut rng = rand::rng();
-        let uniform_bounds = bounds
-            .iter()
-            .enumerate()
-            .map(|(index, &(lower, upper))| {
-                Uniform::new_inclusive(lower, upper)
-                    .map_err(|_error| DifferentialEvolutionError::InvalidBound { index })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut initial_population: Vec<Vec<f64>> = (0..self.pop_size)
-            .map(|_| {
-                uniform_bounds
-                    .iter()
-                    .map(|current_bounds| rng.sample(current_bounds))
-                    .collect()
-            })
-            .collect();
+        let mut population =
+            self.initializer
+                .generate_initial_population(num_members, num_parameters, &mut rng);
         if let Some(point) = warm_start {
-            initial_population.push(point.to_vec());
+            population.push(point.to_vec());
         }
-        let mut population = Self::evaluate_population(cost_func, initial_population)?;
 
-        let num_members = population.len();
-        // Population lengths need only an approximate floating-point representation
-        // for convergence statistics, unlike the exact integer evaluation counter.
+        let mut costs = Self::evaluate_population(cost_func, &population)?;
+
         #[expect(
             clippy::cast_precision_loss,
             reason = "population length is used only for statistical averaging"
         )]
-        let population_size_f64 = num_members as f64;
+        let num_members_f64 = num_members as f64;
 
         // Step 2: Create donor vectors
         // v[i] = z[a] + F * (z[b] - z[c]) where a, b and c are not equal to i
-        let weight = 0.7;
-        let crossover = 0.7;
+        let weight = self.mutation_factor;
+        let crossover = self.crossover_rate.into();
+
+        // Iterate over generations
+        let mut trials = Vec::with_capacity(num_members);
         for _ in 0..self.max_iter {
+            // Add the expected number of function evaluations
             let next_nfev = nfev
                 .checked_add(evaluations_per_generation)
                 .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
+
+            trials.clear();
+
             // Generate trials in order, without changing any parent this generation.
-            let mut trials = Vec::with_capacity(num_members);
             for i in 0..num_members {
                 let indices = sample(&mut rng, num_members - 1, 3);
                 // Sampling three indices is safe after validating pop_size >= 4.
@@ -285,24 +445,23 @@ impl DifferentialEvolution {
                     if index >= i { index + 1 } else { index }
                 });
                 let donor: Vec<_> = population[a_index]
-                    .0
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
                         value
                             + weight
-                                * (population[b_index].0[param_index]
-                                    - population[c_index].0[param_index])
+                                * (population[b_index][param_index]
+                                    - population[c_index][param_index])
                     })
                     .collect();
-                let forced = rng.random_range(0..bounds.len());
+                let forced = rng.random_range(0..num_parameters);
                 let new_pop: Vec<_> = population[i]
-                    .0
                     .iter()
                     .enumerate()
                     .map(|(param_index, value)| {
                         if param_index == forced || rng.random::<f64>() < crossover {
-                            donor[param_index].clamp(bounds[param_index].0, bounds[param_index].1)
+                            // TODO: Handle boundary here
+                            donor[param_index].clamp(0.0, 1.0)
                         } else {
                             *value
                         }
@@ -313,13 +472,18 @@ impl DifferentialEvolution {
             }
 
             // Evaluate the complete generation before committing any updates.
-            let evaluated_trials = Self::evaluate_population(cost_func, trials)?;
-            for (parent, trial) in population.iter_mut().zip(evaluated_trials) {
-                if trial.1 <= parent.1 {
-                    *parent = trial;
+            let trial_costs = Self::evaluate_population(cost_func, &trials)?;
+            for ((parent, parent_cost), (trial, trial_cost)) in population
+                .iter_mut()
+                .zip(costs.iter_mut())
+                .zip(trials.iter().zip(trial_costs))
+            {
+                if trial_cost <= *parent_cost {
+                    trial.clone_into(parent);
+                    *parent_cost = trial_cost;
                 }
             }
-            let converged = self.converged(&population, population_size_f64);
+            let converged = self.converged(&costs, num_members_f64);
             nfev = next_nfev;
             if converged {
                 break;
@@ -329,11 +493,12 @@ impl DifferentialEvolution {
         // Step 4: Select best cost
         let (best_member, best_cost) = population
             .iter()
+            .zip(costs)
             .min_by(|(_, left), (_, right)| left.total_cmp(right))
             .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
 
         // Step 5: Polish best result
-        Self::polish(cost_func, best_member, *best_cost, nfev)
+        Self::polish(cost_func, best_member, best_cost, nfev)
     }
 }
 
@@ -369,20 +534,20 @@ mod tests {
 
     #[test]
     fn de_smoke() {
-        let de = DifferentialEvolution {
+        let de = DifferentialEvolution::new(DifferentialEvolutionConfig {
             pop_size: 90,
             max_iter: 100,
             atol: 0.0,
             rtol: 0.01,
-        };
+            ..Default::default()
+        })
+        .expect("construction should always pass.");
 
         let prob = Rosenbrock {
             lb: vec![0.0, 0.0],
             ub: vec![100.0, 100.0],
         };
-        let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
-
-        let res = de.minimize(&prob, &bounds);
+        let res = de.minimize(&prob, Some(879_123));
         let res = res.expect("test does not pass if this is an error.");
 
         println!("cost = {}", res.cost);
@@ -433,14 +598,16 @@ mod warm_start_tests {
     #[test]
     fn warm_start_adds_population_member_and_evaluation() {
         let objective = objective();
-        let optimizer = DifferentialEvolution {
+        let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
             pop_size: 4,
             max_iter: 1,
             atol: 0.0,
             rtol: 0.0,
-        };
+            ..Default::default()
+        })
+        .expect("construction should always pass.");
         let result = optimizer
-            .minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&[0.123]))
+            .minimize_with_warm_start(&objective, Some(883_331), Some(&[0.123]))
             .unwrap();
         let points = objective.evaluations.lock().unwrap().clone();
         assert!(points[..5].contains(&vec![0.123]));
@@ -452,12 +619,14 @@ mod warm_start_tests {
     #[test]
     fn invalid_warm_starts_fail_before_evaluation() {
         let objective = objective();
-        let optimizer = DifferentialEvolution {
+        let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
             pop_size: 4,
             max_iter: 0,
             atol: 0.0,
             rtol: 0.0,
-        };
+            ..Default::default()
+        })
+        .expect("construction should always pass.");
         for point in [
             vec![],
             vec![0.0, 0.0],
@@ -467,7 +636,7 @@ mod warm_start_tests {
             vec![1.1],
         ] {
             assert!(matches!(
-                optimizer.minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&point)),
+                optimizer.minimize_with_warm_start(&objective, Some(12333), Some(&point)),
                 Err(OptimizationError::Optimizer(
                     DifferentialEvolutionError::InvalidWarmStart
                 ))
