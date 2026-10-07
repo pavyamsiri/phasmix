@@ -174,7 +174,7 @@ impl MutationStrategy {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum CrossoverStrategy {
     /// Each parameter is selected between the mutant and the target independently according to the crossover rate.
     /// One parameter is guaranteed to be from the mutant.
@@ -187,21 +187,84 @@ pub enum CrossoverStrategy {
     // Exponential,
 }
 
+impl CrossoverStrategy {
+    fn crossover(
+        self,
+        mutant: &mut [f64],
+        target: &[f64],
+        crossover_rate: f64,
+        rng: &mut impl Rng,
+    ) {
+        assert_eq!(
+            mutant.len(),
+            target.len(),
+            "`mutant` and `target` must be the same length."
+        );
+        let num_parameters = mutant.len();
+        match self {
+            CrossoverStrategy::Binomial => {
+                let forced = rng.random_range(0..num_parameters);
+                for (param_idx, (mutant_val, target_val)) in
+                    mutant.iter_mut().zip(target.iter()).enumerate()
+                {
+                    if param_idx == forced || rng.random::<f64>() < crossover_rate {
+                    } else {
+                        *mutant_val = *target_val;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum BoundaryStrategy {
-    /// If the trial vector is out of bounds, it is assigned infinite cost and therefore rejected in favour of the target
-    /// vector. Target vectors are guaranteed to be within bounds.
+    /// If the trial vector is out of bounds, each out of bounds parameter is replaced by a newly sampled in-bounds parameter.
+    /// Comparison with the target vector then proceeds as normal.
     #[default]
-    Reject,
+    Resample,
     // NOTE: Not implemented yet.
-    // If the trial vector is out of bounds, each out of bounds parameter is replaced by a newly sampled in-bounds parameter.
-    // Comparison with the target vector then proceeds as normal.
-    // Resample,
     // If the trial vector is out of bounds, each out-of-bounds parameter is reflected across its violated boundary until
     // it lies within bounds.
     // Comparison with the target vector then proceeds as normal.
     // Reflect,
+}
+
+impl BoundaryStrategy {
+    fn bound(
+        self,
+        trial: &mut [f64],
+        lower_bounds: &[f64],
+        upper_bounds: &[f64],
+        rng: &mut impl Rng,
+    ) {
+        assert_eq!(
+            lower_bounds.len(),
+            upper_bounds.len(),
+            "`lower_bounds` and `upper_bounds` must be the same length."
+        );
+        assert_eq!(
+            trial.len(),
+            upper_bounds.len(),
+            "`trial` and `upper_bounds` must be the same length."
+        );
+        let _num_parameters = trial.len();
+        match self {
+            BoundaryStrategy::Resample => {
+                for (val, lb, ub) in itertools::izip!(
+                    trial.iter_mut(),
+                    lower_bounds.iter().copied(),
+                    upper_bounds.iter().copied()
+                ) {
+                    debug_assert!(lb <= ub, "lower bound must be lower than upper bound");
+                    if !(lb..=ub).contains(val) {
+                        *val = rng.random_range(lb..=ub);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[non_exhaustive]
@@ -573,9 +636,6 @@ impl DifferentialEvolution {
         )]
         let num_members_f64 = population_size as f64;
 
-        // Step 2: Create donor vectors
-        // v[i] = z[a] + F * (z[b] - z[c]) where a, b and c are not equal to i
-        let crossover = self.crossover_rate.into();
         let mut best_index = costs
             .iter()
             .enumerate()
@@ -595,29 +655,26 @@ impl DifferentialEvolution {
 
             // Generate trials in order, without changing any parent this generation.
             for target_index in 0..population_size {
-                let donor = self.mutation.generate_mutant(
+                // Step 2: Create mutant vectors using mutation strategy
+                let mut mutant = self.mutation.generate_mutant(
                     &population,
                     self.mutation_factor,
                     target_index,
                     best_index,
                     &mut rng,
                 );
-                let forced = rng.random_range(0..num_parameters);
-                let new_pop: Vec<_> = population[target_index]
-                    .iter()
-                    .enumerate()
-                    .map(|(param_index, value)| {
-                        if param_index == forced || rng.random::<f64>() < crossover {
-                            // TODO: Handle boundary here
-                            donor[param_index]
-                                .clamp(lower_bounds[param_index], upper_bounds[param_index])
-                        } else {
-                            *value
-                        }
-                    })
-                    .collect();
+                // Step 3: Crossover mutant with target
+                self.crossover.crossover(
+                    &mut mutant,
+                    &population[target_index],
+                    f64::from(self.crossover_rate),
+                    &mut rng,
+                );
+                // Step 3.5: Handle out of bounds values
+                self.boundary
+                    .bound(&mut mutant, lower_bounds, upper_bounds, &mut rng);
 
-                trials.push(new_pop);
+                trials.push(mutant);
             }
 
             // Evaluate the complete generation before committing any updates.
