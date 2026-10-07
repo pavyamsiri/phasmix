@@ -1,6 +1,8 @@
 extern crate alloc;
 
 use crate::core::{OptimizationError, OptimizationResult};
+use crate::initialization::InitializationError;
+pub use crate::initialization::InitializationStrategy;
 use basin::CostFunction;
 use core::array;
 use core::cmp;
@@ -8,11 +10,7 @@ use core::cmp;
 use core::convert;
 use core::default;
 use core::fmt;
-use rand::{
-    Rng, RngExt as _, SeedableRng as _,
-    rngs::StdRng,
-    seq::{SliceRandom as _, index::sample},
-};
+use rand::{Rng, RngExt as _, SeedableRng as _, rngs::StdRng, seq::index::sample};
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -309,61 +307,6 @@ impl BoundaryStrategy {
     }
 }
 
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default)]
-pub enum InitializationStrategy {
-    /// Sample once per equally sized stratum in each parameter, independently
-    /// shuffling the strata across population members for each parameter.
-    #[default]
-    LatinHyperCube,
-    Sobol,
-    Independent,
-}
-
-impl InitializationStrategy {
-    fn generate_initial_population(
-        self,
-        pop_size: usize,
-        num_parameters: usize,
-        rng: &mut impl Rng,
-    ) -> Vec<Vec<f64>> {
-        match self {
-            InitializationStrategy::LatinHyperCube => {
-                let mut population = vec![vec![0.0; num_parameters]; pop_size];
-                if pop_size == 0 {
-                    return population;
-                }
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "population size is used to divide the unit interval into strata"
-                )]
-                let stratum_width = 1.0 / pop_size as f64;
-                let mut strata: Vec<_> = (0..pop_size).collect();
-                for parameter in 0..num_parameters {
-                    strata.shuffle(rng);
-                    for (member, &stratum) in population.iter_mut().zip(&strata) {
-                        #[expect(
-                            clippy::cast_precision_loss,
-                            reason = "stratum index is used only to locate a sample within the unit interval"
-                        )]
-                        let sample = (stratum as f64 + rng.random::<f64>()) * stratum_width;
-                        member[parameter] = sample;
-                    }
-                }
-                population
-            }
-            InitializationStrategy::Sobol => todo!(),
-            InitializationStrategy::Independent => (0..pop_size)
-                .map(|_| {
-                    (0..num_parameters)
-                        .map(|_| rng.random_range(0.0..=1.0))
-                        .collect()
-                })
-                .collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct DifferentialEvolutionConfig {
     /// Number of random population members per parameter, excluding the warm start.
@@ -485,6 +428,8 @@ pub enum DifferentialEvolutionInitializationError {
 /// Errors specific to differential evolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DifferentialEvolutionError {
+    #[error(transparent)]
+    Initialization(#[from] InitializationError),
     #[error("Bounds are invalid in some way.")]
     InvalidBounds,
     #[error("Warm start was invalid.")]
@@ -659,28 +604,18 @@ impl DifferentialEvolution {
             return Err(DifferentialEvolutionError::InvalidWarmStart.into());
         }
 
-        let population_size = self
+        let requested_population_size = self
             .pop_size_factor
             .checked_mul(num_parameters)
-            .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?
-            .checked_add(usize::from(warm_start.is_some()))
             .ok_or(DifferentialEvolutionError::EvaluationCountOverflow)?;
-
-        let evaluations_per_generation = u64::try_from(population_size)
-            .map_err(|_error| DifferentialEvolutionError::EvaluationCountOverflow)?;
-
-        let mut nfev = evaluations_per_generation;
 
         let mut rng =
             seed.map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
         // Step 1: Create initial population
         let mut population: Vec<Vec<f64>> = self
             .initializer
-            .generate_initial_population(
-                population_size - usize::from(warm_start.is_some()),
-                num_parameters,
-                &mut rng,
-            )
+            .generate_initial_population(requested_population_size, num_parameters, &mut rng)
+            .map_err(DifferentialEvolutionError::Initialization)?
             .into_iter()
             .map(|params| {
                 params
@@ -694,6 +629,11 @@ impl DifferentialEvolution {
         if let Some(point) = warm_start {
             population.push(point.to_vec());
         }
+
+        let population_size = population.len();
+        let evaluations_per_generation = u64::try_from(population_size)
+            .map_err(|_| DifferentialEvolutionError::EvaluationCountOverflow)?;
+        let mut nfev = evaluations_per_generation;
 
         let mut costs = Self::evaluate_population(cost_func, &population)?;
 
@@ -780,84 +720,6 @@ impl DifferentialEvolution {
 
         // Step 5: Polish best result
         Self::polish(cost_func, best_member, best_cost, nfev)
-    }
-}
-
-#[cfg(test)]
-mod initialization_tests {
-    use super::*;
-
-    #[test]
-    fn latin_hypercube_covers_each_stratum_in_every_parameter() {
-        let mut rng = StdRng::seed_from_u64(883_331);
-        let population =
-            InitializationStrategy::LatinHyperCube.generate_initial_population(16, 4, &mut rng);
-        assert_eq!(population.len(), 16, "population size must be preserved");
-        assert!(
-            population.iter().all(|point| point.len() == 4),
-            "every point must have the requested dimension"
-        );
-        let mut assignments = Vec::new();
-        for parameter in 0..4 {
-            let mut counts = [0; 16];
-            let strata: Vec<_> = population
-                .iter()
-                .map(|point| {
-                    let value = point[parameter];
-                    assert!(
-                        (0.0..1.0).contains(&value),
-                        "samples must lie in the unit interval"
-                    );
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "sample is in [0, 1), so its stratum index is in 0..16"
-                    )]
-                    let stratum = (value * 16.0) as usize;
-                    counts[stratum] += 1;
-                    stratum
-                })
-                .collect();
-            assert_eq!(
-                counts, [1; 16],
-                "each parameter must sample every stratum once"
-            );
-            assignments.push(strata);
-        }
-        assert!(
-            assignments.windows(2).all(|pair| pair[0] != pair[1]),
-            "parameters must shuffle strata independently for this seed"
-        );
-        let repeated = InitializationStrategy::LatinHyperCube.generate_initial_population(
-            16,
-            4,
-            &mut StdRng::seed_from_u64(883_331),
-        );
-        assert_eq!(
-            population, repeated,
-            "seeded initialization must be reproducible"
-        );
-    }
-
-    #[test]
-    fn latin_hypercube_supports_empty_and_single_member_populations() {
-        let mut rng = StdRng::seed_from_u64(1);
-        assert!(
-            InitializationStrategy::LatinHyperCube
-                .generate_initial_population(0, 2, &mut rng)
-                .is_empty(),
-            "empty population must stay empty"
-        );
-        let population =
-            InitializationStrategy::LatinHyperCube.generate_initial_population(1, 2, &mut rng);
-        assert_eq!(
-            population.len(),
-            1,
-            "single-member population must be preserved"
-        );
-        assert!(
-            population[0].iter().all(|value| (0.0..1.0).contains(value)),
-            "single-member samples must lie in the unit interval"
-        );
     }
 }
 
@@ -1045,6 +907,41 @@ mod warm_start_tests {
                 u64::try_from(points.len()).unwrap(),
                 "evaluation accounting must hold at the shared minimum"
             );
+        }
+    }
+
+    #[test]
+    fn sobol_population_rounding_preserves_evaluation_counts_and_warm_start() {
+        for warm_start in [None, Some(&[0.123][..])] {
+            let objective = objective();
+            let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
+                initializer: InitializationStrategy::Sobol,
+                max_iter: 1,
+                atol: 0.0,
+                rtol: 0.0,
+                ..Default::default()
+            })
+            .unwrap();
+            let result = optimizer
+                .minimize_with_warm_start(&objective, Some(1), warm_start)
+                .unwrap();
+            let points = objective.evaluations.lock().unwrap();
+            assert_eq!(
+                result.nfev,
+                u64::try_from(points.len()).unwrap(),
+                "evaluation counts must include every rounded member"
+            );
+            let count = 8 + usize::from(warm_start.is_some());
+            assert!(
+                points.len() >= 2 * count,
+                "the complete population must evolve"
+            );
+            if warm_start.is_some() {
+                assert!(
+                    points[..count].contains(&vec![0.123]),
+                    "warm start must be appended after rounding"
+                );
+            }
         }
     }
 
