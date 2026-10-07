@@ -859,7 +859,7 @@ impl<const N: usize> GlobalOptimizer<N> {
     pub fn differential_evolution() -> Self {
         Self::DifferentialEvolution(
             DifferentialEvolution::new(DifferentialEvolutionConfig {
-                pop_size: 15,
+                pop_size_factor: 15,
                 max_iter: 100,
                 atol: 0.0,
                 rtol: 0.01,
