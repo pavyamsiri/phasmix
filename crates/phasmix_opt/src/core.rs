@@ -1,6 +1,8 @@
 //! Common types and utilities.
 use core::cmp;
 
+use thiserror::Error;
+
 /// Result of a global optimizer and additional diagnostics.
 #[derive(Debug, Clone)]
 pub struct OptimizationResult {
@@ -12,8 +14,21 @@ pub struct OptimizationResult {
     pub nfev: u64,
 }
 
+/// A failure in the objective or the optimizer.
+#[derive(Debug, Error)]
+pub enum OptimizationError<C, O> {
+    /// An objective evaluation failed, including during local polishing.
+    CostFunction(C),
+    /// The optimizer configuration or bookkeeping is invalid.
+    Optimizer(O),
+}
+
+/// A point in parameter space and its cost.
+/// Used so that points in parameter space can be ordered.
 pub(crate) struct OrderedPoint {
+    /// The cost of the point.
     pub(crate) cost: f64,
+    /// The point in parameter space.
     pub(crate) point: Vec<f64>,
 }
 

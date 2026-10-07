@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use crate::core::OptimizationResult;
+use crate::core::{OptimizationError, OptimizationResult};
 use basin::CostFunction;
 #[cfg(test)]
 use core::convert;
@@ -15,15 +15,6 @@ pub struct DifferentialEvolution {
     pub max_iter: usize,
     pub atol: f64,
     pub rtol: f64,
-}
-
-/// A failure in the objective or the differential evolution optimizer.
-#[derive(Debug, Error)]
-pub enum OptimizationError<E> {
-    /// An objective evaluation failed, including during local polishing.
-    CostFunction(E),
-    /// The optimizer configuration or bookkeeping is invalid.
-    DifferentialEvolution(DifferentialEvolutionError),
 }
 
 /// Errors specific to differential evolution.
@@ -55,9 +46,9 @@ pub enum DifferentialEvolutionError {
     InvalidWarmStart,
 }
 
-impl<E> From<DifferentialEvolutionError> for OptimizationError<E> {
+impl<C> From<DifferentialEvolutionError> for OptimizationError<C, DifferentialEvolutionError> {
     fn from(error: DifferentialEvolutionError) -> Self {
-        Self::DifferentialEvolution(error)
+        Self::Optimizer(error)
     }
 }
 
@@ -124,7 +115,7 @@ impl DifferentialEvolution {
     fn evaluate_population<C>(
         cost_func: &C,
         population: Vec<Vec<f64>>,
-    ) -> Result<EvaluatedPopulation, OptimizationError<C::Error>>
+    ) -> Result<EvaluatedPopulation, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64> + Sync,
         C::Error: Send,
@@ -147,7 +138,7 @@ impl DifferentialEvolution {
         best_member: &[f64],
         best_cost: f64,
         nfev: u64,
-    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
+    ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64> + Clone + basin::BoxConstraints,
     {
@@ -194,7 +185,7 @@ impl DifferentialEvolution {
         &self,
         cost_func: &C,
         bounds: &[(f64, f64)],
-    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
+    ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
             + Clone
@@ -216,7 +207,7 @@ impl DifferentialEvolution {
         cost_func: &C,
         bounds: &[(f64, f64)],
         warm_start: Option<&[f64]>,
-    ) -> Result<OptimizationResult, OptimizationError<C::Error>>
+    ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
             + Clone
@@ -392,12 +383,7 @@ mod tests {
         let bounds = vec![(0.0, 100.0), (0.0, 100.0)];
 
         let res = de.minimize(&prob, &bounds);
-
-        assert!(res.is_ok());
-
-        let Ok(res) = res else {
-            panic!("Assert should've caught it earlier.");
-        };
+        let res = res.expect("test does not pass if this is an error.");
 
         println!("cost = {}", res.cost);
         println!("params = {:?}", res.params);
@@ -482,7 +468,7 @@ mod warm_start_tests {
         ] {
             assert!(matches!(
                 optimizer.minimize_with_warm_start(&objective, &[(0.0, 1.0)], Some(&point)),
-                Err(OptimizationError::DifferentialEvolution(
+                Err(OptimizationError::Optimizer(
                     DifferentialEvolutionError::InvalidWarmStart
                 ))
             ));
