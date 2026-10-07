@@ -222,13 +222,11 @@ impl CrossoverStrategy {
 pub enum BoundaryStrategy {
     /// If the trial vector is out of bounds, each out of bounds parameter is replaced by a newly sampled in-bounds parameter.
     /// Comparison with the target vector then proceeds as normal.
-    #[default]
     Resample,
-    // NOTE: Not implemented yet.
-    // If the trial vector is out of bounds, each out-of-bounds parameter is reflected across its violated boundary until
-    // it lies within bounds.
-    // Comparison with the target vector then proceeds as normal.
-    // Reflect,
+    /// Reflect out-of-bounds parameters across the bounds, including repeated
+    /// overshoots. Non-finite parameters are resampled because reflection is undefined.
+    #[default]
+    Reflect,
 }
 
 impl BoundaryStrategy {
@@ -249,7 +247,6 @@ impl BoundaryStrategy {
             upper_bounds.len(),
             "`trial` and `upper_bounds` must be the same length."
         );
-        let _num_parameters = trial.len();
         match self {
             BoundaryStrategy::Resample => {
                 for (val, lb, ub) in itertools::izip!(
@@ -260,6 +257,47 @@ impl BoundaryStrategy {
                     debug_assert!(lb <= ub, "lower bound must be lower than upper bound");
                     if !(lb..=ub).contains(val) {
                         *val = rng.random_range(lb..=ub);
+                    }
+                }
+            }
+            BoundaryStrategy::Reflect => {
+                for (val, lb, ub) in itertools::izip!(
+                    trial.iter_mut(),
+                    lower_bounds.iter().copied(),
+                    upper_bounds.iter().copied()
+                ) {
+                    if (lb..=ub).contains(val) {
+                        continue;
+                    }
+                    let width = ub - lb;
+                    if width == 0.0 {
+                        *val = lb;
+                    } else if !val.is_finite() {
+                        *val = rng.random_range(lb..=ub);
+                    } else {
+                        // Fold a period of twice the width into the bounded interval.
+                        // Reduce operands separately to avoid overflowing val - lb.
+                        let period = 2.0 * width;
+                        let reflected = if period.is_finite() {
+                            let offset =
+                                (val.rem_euclid(period) - lb.rem_euclid(period)).rem_euclid(period);
+                            if offset <= width {
+                                lb + offset
+                            } else {
+                                ub - (offset - width)
+                            }
+                        } else {
+                            // Halve coordinates when twice the width would overflow.
+                            let offset = ((*val * 0.5).rem_euclid(width)
+                                - (lb * 0.5).rem_euclid(width))
+                            .rem_euclid(width);
+                            if offset <= width * 0.5 {
+                                2.0f64.mul_add(offset, lb)
+                            } else {
+                                2.0f64.mul_add(-width.mul_add(-0.5, offset), ub)
+                            }
+                        };
+                        *val = reflected.clamp(lb, ub);
                     }
                 }
             }
@@ -713,6 +751,57 @@ impl DifferentialEvolution {
 
         // Step 5: Polish best result
         Self::polish(cost_func, best_member, best_cost, nfev)
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn reflection_handles_both_bounds_and_multiple_overshoots() {
+        let mut trial = vec![9.0, 21.0, -15.0, 45.0, 10.0, 20.0, 15.0];
+        let mut rng = StdRng::seed_from_u64(1);
+        BoundaryStrategy::Reflect.bound(&mut trial, &[10.0; 7], &[20.0; 7], &mut rng);
+        assert_eq!(
+            trial,
+            vec![11.0, 19.0, 15.0, 15.0, 10.0, 20.0, 15.0],
+            "reflection must fold repeated overshoots and preserve in-bounds values"
+        );
+    }
+
+    #[test]
+    fn reflection_handles_fixed_bounds_and_nonfinite_values() {
+        let mut trial = vec![100.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let mut rng = StdRng::seed_from_u64(1);
+        BoundaryStrategy::Reflect.bound(
+            &mut trial,
+            &[3.0, 10.0, 10.0, 10.0],
+            &[3.0, 20.0, 20.0, 20.0],
+            &mut rng,
+        );
+        assert_eq!(trial[0], 3.0, "fixed bounds must be preserved");
+        assert!(
+            trial[1..].iter().all(|val| (10.0..=20.0).contains(val)),
+            "non-finite values must be repaired"
+        );
+    }
+
+    #[test]
+    fn reflection_avoids_overflow_for_large_finite_values() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut trial = vec![f64::MAX, -f64::MAX];
+        BoundaryStrategy::Reflect.bound(&mut trial, &[-1.0e308; 2], &[0.0; 2], &mut rng);
+        assert!(
+            trial.iter().all(|val| (-1.0e308..=0.0).contains(val)),
+            "reflection must work when twice the width overflows"
+        );
+        let mut trial = vec![f64::MAX];
+        BoundaryStrategy::Reflect.bound(&mut trial, &[-1.0e308], &[-9.0e307], &mut rng);
+        assert!(
+            (-1.0e308..=-9.0e307).contains(&trial[0]),
+            "reflection must work when subtracting the lower bound would overflow"
+        );
     }
 }
 
