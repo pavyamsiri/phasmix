@@ -12,6 +12,10 @@ use rand::{Rng, RngExt as _, SeedableRng as _, rngs::StdRng, seq::index::sample}
 use rayon::prelude::*;
 use thiserror::Error;
 
+// Best2 excludes target and best before sampling four distinct members;
+// Rand2 excludes the target before sampling five distinct members.
+const MIN_POPULATION_SIZE: usize = 6;
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub enum MutationStrategy {
@@ -50,7 +54,8 @@ impl MutationStrategy {
             "best index must be within bounds."
         );
 
-        let excluding = &match target_index.cmp(&best_index) {
+        let exclude_target = &[target_index];
+        let exclude_target_and_best = &match target_index.cmp(&best_index) {
             cmp::Ordering::Less => [target_index, best_index],
             cmp::Ordering::Equal => [target_index, population.len()],
             cmp::Ordering::Greater => [best_index, target_index],
@@ -58,7 +63,7 @@ impl MutationStrategy {
 
         match self {
             MutationStrategy::Best1 => {
-                let [r1, r2] = Self::sample_indices(population.len(), excluding, rng);
+                let [r1, r2] = Self::sample_indices(population.len(), exclude_target_and_best, rng);
                 itertools::izip!(
                     population[best_index].iter(),
                     population[r1].iter(),
@@ -69,7 +74,8 @@ impl MutationStrategy {
             }
 
             MutationStrategy::Best2 => {
-                let [r1, r2, r3, r4] = Self::sample_indices(population.len(), excluding, rng);
+                let [r1, r2, r3, r4] =
+                    Self::sample_indices(population.len(), exclude_target_and_best, rng);
                 itertools::izip!(
                     population[best_index].iter(),
                     population[r1].iter(),
@@ -83,7 +89,7 @@ impl MutationStrategy {
                 .collect()
             }
             MutationStrategy::Rand1 => {
-                let [r0, r1, r2] = Self::sample_indices(population.len(), excluding, rng);
+                let [r0, r1, r2] = Self::sample_indices(population.len(), exclude_target, rng);
                 itertools::izip!(
                     population[r0].iter(),
                     population[r1].iter(),
@@ -93,7 +99,8 @@ impl MutationStrategy {
                 .collect()
             }
             MutationStrategy::Rand2 => {
-                let [r0, r1, r2, r3, r4] = Self::sample_indices(population.len(), excluding, rng);
+                let [r0, r1, r2, r3, r4] =
+                    Self::sample_indices(population.len(), exclude_target, rng);
                 itertools::izip!(
                     population[r0].iter(),
                     population[r1].iter(),
@@ -107,30 +114,29 @@ impl MutationStrategy {
                 .collect()
             }
             MutationStrategy::RandToBest => {
-                let [r0, r1, r2, r3] = Self::sample_indices(population.len(), excluding, rng);
+                let [r0, r1, r2] =
+                    Self::sample_indices(population.len(), exclude_target_and_best, rng);
                 itertools::izip!(
                     population[r0].iter(),
                     population[r1].iter(),
                     population[r2].iter(),
-                    population[r3].iter(),
                     population[best_index].iter()
                 )
-                .map(|(r0_val, r1_val, r2_val, r3_val, best_val)| {
-                    r0_val + mutation_factor * (best_val + r1_val - r2_val - r3_val)
+                .map(|(r0_val, r1_val, r2_val, best_val)| {
+                    r0_val + mutation_factor * (best_val - r0_val + r1_val - r2_val)
                 })
                 .collect()
             }
             MutationStrategy::CurrentToBest => {
-                let [r1, r2, r3] = Self::sample_indices(population.len(), excluding, rng);
+                let [r1, r2] = Self::sample_indices(population.len(), exclude_target_and_best, rng);
                 itertools::izip!(
                     population[target_index].iter(),
                     population[r1].iter(),
                     population[r2].iter(),
-                    population[r3].iter(),
                     population[best_index].iter()
                 )
-                .map(|(target_val, r1_val, r2_val, r3_val, best_val)| {
-                    target_val + mutation_factor * (best_val + r1_val - r2_val - r3_val)
+                .map(|(target_val, r1_val, r2_val, best_val)| {
+                    target_val + mutation_factor * (best_val - target_val + r1_val - r2_val)
                 })
                 .collect()
             }
@@ -231,6 +237,7 @@ impl InitializationStrategy {
 #[derive(Debug, Clone)]
 pub struct DifferentialEvolutionConfig {
     /// Number of random population members per parameter, excluding the warm start.
+    /// Must be at least six to support every mutation strategy in one dimension.
     pub pop_size_factor: usize,
     pub max_iter: usize,
     pub crossover_rate: f32,
@@ -246,7 +253,7 @@ pub struct DifferentialEvolutionConfig {
 impl default::Default for DifferentialEvolutionConfig {
     fn default() -> Self {
         Self {
-            pop_size_factor: 4,
+            pop_size_factor: MIN_POPULATION_SIZE,
             max_iter: 10,
             crossover_rate: 0.7,
             mutation_factor: 0.5,
@@ -279,17 +286,17 @@ impl DifferentialEvolution {
     ///
     /// # Errors
     /// Initialization will fail if any of the configuration is invalid:
-    /// - `pop_size_factor` is too small; less than 4.
+    /// - `pop_size_factor` is too small; less than 6.
     /// - `atol` or `rtol` are invalid tolerances; non-finite or negative.
     /// - `crossover_rate` is invalid; should be a probability in the range [0.0, 1.0].
     /// - `mutation_factor` is invalid; non-finite or negative.
     pub fn new(
         config: DifferentialEvolutionConfig,
     ) -> Result<DifferentialEvolution, DifferentialEvolutionInitializationError> {
-        if config.pop_size_factor < 4 {
+        if config.pop_size_factor < MIN_POPULATION_SIZE {
             return Err(
                 DifferentialEvolutionInitializationError::PopulationTooSmall {
-                    size: config.pop_size_factor as u8,
+                    size: config.pop_size_factor,
                 },
             );
         }
@@ -328,10 +335,9 @@ impl DifferentialEvolution {
 /// Errors when creating a differential evolution optimizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DifferentialEvolutionInitializationError {
-    /// The optimizer only supports `popsize` greater than or equal to four.
-    /// This is so that all strategies can be supported.
-    #[error("Differential evolution requires at least four population members.")]
-    PopulationTooSmall { size: u8 },
+    /// The population factor must be at least six to support all mutation strategies.
+    #[error("Differential evolution requires a population factor of at least six, but got {size}.")]
+    PopulationTooSmall { size: usize },
     /// Absolute tolerance must be finite and nonnegative.
     #[error("Absolute tolerance must be finite and nonnegative.")]
     InvalidAbsoluteTolerance,
@@ -631,6 +637,14 @@ impl DifferentialEvolution {
             if converged {
                 break;
             }
+
+            // Update best index
+            best_index = costs
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index)
+                .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
         }
 
         // Step 4: Select best cost
@@ -739,10 +753,53 @@ mod warm_start_tests {
     }
 
     #[test]
+    fn shared_population_minimum_supports_every_strategy() {
+        for mutation in [
+            MutationStrategy::Best1,
+            MutationStrategy::Best2,
+            MutationStrategy::Rand1,
+            MutationStrategy::Rand2,
+            MutationStrategy::RandToBest,
+            MutationStrategy::CurrentToBest,
+        ] {
+            for pop_size_factor in 0..MIN_POPULATION_SIZE {
+                assert!(
+                    matches!(
+                        DifferentialEvolution::new(DifferentialEvolutionConfig {
+                            pop_size_factor,
+                            mutation,
+                            ..Default::default()
+                        }),
+                        Err(DifferentialEvolutionInitializationError::PopulationTooSmall { size })
+                            if size == pop_size_factor
+                    ),
+                    "every strategy must reject factors below the shared minimum"
+                );
+            }
+            let objective = objective();
+            let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
+                mutation,
+                max_iter: 2,
+                atol: 0.0,
+                rtol: 0.0,
+                ..Default::default()
+            })
+            .unwrap();
+            let result = optimizer.minimize(&objective, Some(883_331)).unwrap();
+            let points = objective.evaluations.lock().unwrap();
+            assert_eq!(
+                result.nfev,
+                u64::try_from(points.len()).unwrap(),
+                "evaluation accounting must hold at the shared minimum"
+            );
+        }
+    }
+
+    #[test]
     fn warm_start_adds_population_member_and_evaluation() {
         let objective = objective();
         let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
-            pop_size_factor: 4,
+            pop_size_factor: MIN_POPULATION_SIZE,
             max_iter: 1,
             atol: 0.0,
             rtol: 0.0,
@@ -753,10 +810,10 @@ mod warm_start_tests {
             .minimize_with_warm_start(&objective, Some(883_331), Some(&[0.123]))
             .unwrap();
         let points = objective.evaluations.lock().unwrap().clone();
-        assert!(points[..5].contains(&vec![0.123]));
+        assert!(points[..7].contains(&vec![0.123]));
         assert_eq!(result.nfev, u64::try_from(points.len()).unwrap());
         assert_eq!(result.params, vec![0.123]);
-        assert!(points.len() >= 10);
+        assert!(points.len() >= 14);
     }
 
     #[test]
@@ -777,7 +834,7 @@ mod warm_start_tests {
             .minimize_with_warm_start(&objective, Some(883_331), Some(&[15.0, 3.0]))
             .unwrap();
         let points = objective.evaluations.lock().unwrap();
-        assert!(points[..9].contains(&vec![15.0, 3.0]));
+        assert!(points[..13].contains(&vec![15.0, 3.0]));
         assert!(
             points
                 .iter()
@@ -830,7 +887,7 @@ mod warm_start_tests {
     fn invalid_warm_starts_fail_before_evaluation() {
         let objective = objective();
         let optimizer = DifferentialEvolution::new(DifferentialEvolutionConfig {
-            pop_size_factor: 4,
+            pop_size_factor: MIN_POPULATION_SIZE,
             max_iter: 0,
             atol: 0.0,
             rtol: 0.0,
