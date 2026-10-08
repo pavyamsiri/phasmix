@@ -39,6 +39,7 @@ from ._internal import PSpiralModel as RustPSpiralModel
 from ._likelihood_utils import ln_likelihood
 from .bounds import Fixed, Interval, ParameterBounds
 from .model import PSpiralModel
+from .optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -93,14 +94,25 @@ class RustFitBackend(FitBackend):
         smoothing_func: _SmoothingFunc | SmoothConfig | None,
         mask_func: _MaskFunc | MaskConfig | None,
         bounds: ParameterBounds | Sequence[ParameterBounds] | None,
-        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"] = "tiktak",
-        nelder_mead_maxiter: int = 1500,
+        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"]
+        | DifferentialEvolutionConfig
+        | TikTakConfig
+        | NelderMeadConfig = "tiktak",
     ) -> None:
-        if type(nelder_mead_maxiter) is not int or nelder_mead_maxiter < 1:
-            msg = "nelder_mead_maxiter must be a positive integer."
+        # Normalize optimizer configuration
+        self._optimizer: DifferentialEvolutionConfig | TikTakConfig | NelderMeadConfig
+        if optimizer == "tiktak":
+            self._optimizer = TikTakConfig()
+        elif optimizer == "differential_evolution":
+            self._optimizer = DifferentialEvolutionConfig()
+        elif optimizer == "nelder_mead":
+            self._optimizer = NelderMeadConfig()
+        elif isinstance(optimizer, (DifferentialEvolutionConfig, TikTakConfig, NelderMeadConfig)):  # pyright: ignore[reportUnnecessaryIsInstance]
+            self._optimizer = optimizer
+        else:
+            msg = f"Invalid global optimizer configuration: {optimizer}"  # pyright: ignore[reportUnreachable]
             raise ValueError(msg)
-        self._optimizer = optimizer
-        self._nelder_mead_maxiter = nelder_mead_maxiter
+
         smooth_config = RustFitBackend._parse_smooth_func(smoothing_func)
 
         self._mask_func: _MaskFunc = RustFitBackend._parse_mask_func(mask_func)
@@ -112,14 +124,17 @@ class RustFitBackend(FitBackend):
             sigma_z=smooth_config.z_scale,
             sigma_vz=smooth_config.vz_scale,
             bounds=self._rust_bounds_components(),
-            optimizer=optimizer,
-            nelder_mead_maxiter=nelder_mead_maxiter,
+            optimizer=self._optimizer,
         )
 
     @property
     def local_optimizer_maxiter(self) -> int:
         """Default iteration budget for local Nelder-Mead refits."""
-        return self._nelder_mead_maxiter
+        if isinstance(self._optimizer, NelderMeadConfig):
+            return self._optimizer.max_iter
+        if isinstance(self._optimizer, DifferentialEvolutionConfig):
+            return self._optimizer.max_local_iter
+        return NelderMeadConfig().max_iter
 
     def with_local_optimizer(self, *, maxiter: int) -> RustFitBackend:
         """Copy this backend for one bounded Nelder-Mead search per winding candidate."""
@@ -127,13 +142,12 @@ class RustFitBackend(FitBackend):
             msg = "maxiter must be a positive integer."
             raise ValueError(msg)
         backend = copy(self)
-        backend._nelder_mead_maxiter = maxiter  # noqa: SLF001 -- configure an isolated copy.
-        backend._optimizer = "nelder_mead"  # noqa: SLF001 -- configure an isolated copy.
+        backend._optimizer = NelderMeadConfig(max_iter=maxiter)  # noqa: SLF001 -- configure an isolated copy.
         backend._rust_fitter = self._rust_fitter.with_local_optimizer(maxiter=maxiter)  # noqa: SLF001
         return backend
 
     def _validate_local_request(self, request: FitRequest) -> None:
-        if self._optimizer == "nelder_mead" and (request.warm_start is None or request.num_components is None):
+        if isinstance(self._optimizer, NelderMeadConfig) and (request.warm_start is None or request.num_components is None):
             msg = "nelder_mead requires a warm_start and explicit component count."
             raise ValueError(msg)
 
@@ -254,6 +268,12 @@ class RustFitBackend(FitBackend):
                 serialized.append((bound.lower, bound.upper))
         return tuple(serialized)
 
+    @staticmethod
+    def _fit_seed(request: FitRequest) -> int:
+        """Consume one full-width uint64 from the per-fit Python generator."""
+        rng = request.rng if request.rng is not None else np.random.default_rng()
+        return int(rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64, endpoint=True))
+
     @override
     def fit_batch(self, requests: Sequence[FitRequest], *, workers: int | None = None) -> list[BackendResult]:
         """Prepare grids, then fit the supported items in one native batch."""
@@ -311,6 +331,7 @@ class RustFitBackend(FitBackend):
             native_results = self._rust_fitter.fit_batch(
                 inputs,
                 workers=workers,
+                seeds=[self._fit_seed(requests[index]) for index in indices],
                 warm_starts=[
                     None if request.warm_start is None else request.warm_start.tolist()
                     for request in (requests[index] for index in indices)
@@ -348,6 +369,7 @@ class RustFitBackend(FitBackend):
             z_mesh.flatten(),
             vz_mesh.flatten(),
             shape=shape,
+            seed=self._fit_seed(request),
             num_components=request.num_components,
             winding=request.winding,
             improve_background=request.improve_background,
@@ -378,6 +400,7 @@ class RustFitBackend(FitBackend):
             z_mesh.flatten(),
             vz_mesh.flatten(),
             shape=shape,
+            seed=self._fit_seed(request),
             num_components=request.num_components,
             winding=request.winding,
             improve_background=request.improve_background,
@@ -443,8 +466,8 @@ class RustFitBackend(FitBackend):
         return OptimizationDiagnostics(
             message=(
                 f"Rust local Nelder-Mead: {rust_result.optimizer_message}"
-                if self._optimizer == "nelder_mead"
-                else f"Rust {self._optimizer}/Nelder-Mead optimization completed."
+                if isinstance(self._optimizer, NelderMeadConfig)
+                else f"Rust {type(self._optimizer).__name__}/Nelder-Mead optimization completed."
             ),
             success=rust_result.optimizer_success,
             nfev=rust_result.nfev,

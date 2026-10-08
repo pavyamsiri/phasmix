@@ -50,6 +50,7 @@ ignore = [
     "S101",
     "TD003",
     "C901",
+    "CPY001"
 ]
 
 [dependency-groups]

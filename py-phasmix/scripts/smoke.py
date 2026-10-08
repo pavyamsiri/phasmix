@@ -11,19 +11,22 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmix import bootstrap_uncertainty, fit, profile_likelihood
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.fit import PSpiralFitter
+from phasmix.optimizers import DifferentialEvolutionConfig
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
+
+from phasmix import bootstrap_uncertainty, fit, profile_likelihood
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Final
 
     from optype import numpy as onp
+
     from phasmix import BootstrapResult, ProfileLikelihoodResult
     from phasmix.fit import PSpiralFitResult
 

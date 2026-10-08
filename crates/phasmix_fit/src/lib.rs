@@ -235,6 +235,7 @@ mod tests {
         // Exercise the real optimizer without depending on parameter recovery.
         PSpiralFitterND {
             warm_start: None,
+            seed: None,
             parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: (0.0, 0.0),
@@ -281,6 +282,7 @@ mod tests {
         assert_eq!(single.num_free_parameters(), 6);
         double = PSpiralFitterND {
             warm_start: None,
+            seed: None,
             parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(TikTak::new(1, 0.25, 0.1, 0.995)),
             alpha_bounds: single.alpha_bounds,
@@ -874,6 +876,7 @@ impl<const N: usize> GlobalOptimizer<N> {
         objective: &C,
         bounds: &[(f64, f64)],
         warm_start: Option<&[f64]>,
+        seed: Option<u64>,
     ) -> Result<FitOptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64>
@@ -893,11 +896,23 @@ impl<const N: usize> GlobalOptimizer<N> {
                 .map(FitOptimizationResult::from_global)
                 .map_err(OptimizationError::CostFunction),
             Self::DifferentialEvolution(optimizer) => {
-                let result = optimizer.minimize_with_warm_start(objective, None, warm_start)?;
+                let result = optimizer.minimize_with_warm_start(objective, seed, warm_start)?;
                 Ok(FitOptimizationResult::from_global(result))
             }
         }
     }
+}
+
+/// Derive an attempt seed by folding stable context tags through SplitMix64.
+/// Uses wrapping arithmetic; does not depend on execution order or hashing state.
+fn derive_seed(mut seed: u64, context: &[u64]) -> u64 {
+    for &tag in context {
+        seed = seed.wrapping_add(tag).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        seed = (seed ^ (seed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        seed = (seed ^ (seed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        seed ^= seed >> 31;
+    }
+    seed
 }
 
 const fn combined_winding_diagnostics(
@@ -918,6 +933,8 @@ pub struct PSpiralFitterND<const N: usize> {
     pub optimizer: GlobalOptimizer<N>,
     /// Optional full parameter vector appended to the optimizer population.
     pub warm_start: Option<Vec<f64>>,
+    /// Optional per-fit RNG seed for reproducible differential evolution.
+    pub seed: Option<u64>,
     /// Optional full bounds, allowing each component to have distinct constraints.
     pub parameter_bounds: Option<Vec<(f64, f64)>>,
     /// The bounds for `alpha`.
@@ -939,6 +956,7 @@ impl<const N: usize> Clone for PSpiralFitterND<N> {
         Self {
             optimizer: self.optimizer.clone(),
             warm_start: self.warm_start.clone(),
+            seed: self.seed,
             parameter_bounds: self.parameter_bounds.clone(),
             alpha_bounds: self.alpha_bounds,
             b_bounds: self.b_bounds,
@@ -1174,7 +1192,19 @@ impl PSpiralFitterIterative {
                 _ => unreachable!(),
             }
         }
-        match self.num_components {
+        let root_single_seed = self.fitter.fitter_single.seed;
+        let root_double_seed = self.fitter.fitter_double.seed;
+        self.fitter.fitter_single.seed = self
+            .fitter
+            .fitter_single
+            .seed
+            .map(|seed| derive_seed(seed, &[1, self.iteration_index as u64]));
+        self.fitter.fitter_double.seed = self
+            .fitter
+            .fitter_double
+            .seed
+            .map(|seed| derive_seed(seed, &[1, self.iteration_index as u64]));
+        let result = match self.num_components {
             1 => {
                 let (component, quality, diagnostics) = if let Some(winding) = self.best_winding {
                     self.fitter.fitter_single.fit_with_winding_diagnostics(
@@ -1235,7 +1265,10 @@ impl PSpiralFitterIterative {
                 )
             }
             _ => panic!("Unsupported `num_components`"),
-        }
+        };
+        self.fitter.fitter_single.seed = root_single_seed;
+        self.fitter.fitter_double.seed = root_double_seed;
+        result
     }
 
     /// Propose a smoothed, count-normalized background for a model.
@@ -1406,17 +1439,28 @@ impl PSpiralFitter {
         improve_background: bool,
     ) -> PSpiralFitterIterative {
         let actual_num_components = num_components.unwrap_or_else(|| {
+            let mut selection_fitter = self.clone();
+            selection_fitter.fitter_single.seed = selection_fitter
+                .fitter_single
+                .seed
+                .map(|seed| derive_seed(seed, &[0, 0]));
+            selection_fitter.fitter_double.seed = selection_fitter
+                .fitter_double
+                .seed
+                .map(|seed| derive_seed(seed, &[0, 0]));
             // BIC comparison penalizes only parameters that remain free.
             let (_, ll_single, _) = match winding {
-                Some(winding) => self.fitter_single.fit_spiral_with_background_with_winding(
-                    initial_density,
-                    initial_background,
-                    mask,
-                    mesh_x,
-                    mesh_y,
-                    winding,
-                ),
-                None => self.fitter_single.fit_spiral_with_background(
+                Some(winding) => selection_fitter
+                    .fitter_single
+                    .fit_spiral_with_background_with_winding(
+                        initial_density,
+                        initial_background,
+                        mask,
+                        mesh_x,
+                        mesh_y,
+                        winding,
+                    ),
+                None => selection_fitter.fitter_single.fit_spiral_with_background(
                     initial_density,
                     initial_background,
                     mask,
@@ -1425,15 +1469,17 @@ impl PSpiralFitter {
                 ),
             };
             let (_, _, ll_double, _) = match winding {
-                Some(winding) => self.fitter_double.fit_spiral_with_background_with_winding(
-                    initial_density,
-                    initial_background,
-                    mask,
-                    mesh_x,
-                    mesh_y,
-                    winding,
-                ),
-                None => self.fitter_double.fit_spiral_with_background(
+                Some(winding) => selection_fitter
+                    .fitter_double
+                    .fit_spiral_with_background_with_winding(
+                        initial_density,
+                        initial_background,
+                        mask,
+                        mesh_x,
+                        mesh_y,
+                        winding,
+                    ),
+                None => selection_fitter.fitter_double.fit_spiral_with_background(
                     initial_density,
                     initial_background,
                     mask,
@@ -1444,11 +1490,11 @@ impl PSpiralFitter {
 
             let ln_norm = initial_density.iter().sum::<f64>().ln();
             let bic_single = ln_norm.mul_add(
-                self.fitter_single.num_free_parameters() as f64,
+                selection_fitter.fitter_single.num_free_parameters() as f64,
                 -2.0 * ll_single,
             );
             let bic_double = ln_norm.mul_add(
-                self.fitter_double.num_free_parameters() as f64,
+                selection_fitter.fitter_double.num_free_parameters() as f64,
                 -2.0 * ll_double,
             );
 
@@ -1625,6 +1671,8 @@ impl PSpiralFitterND<6> {
                 },
                 &bounds,
                 self.warm_start.as_deref(),
+                self.seed
+                    .map(|seed| derive_seed(seed, &[1, winding as i8 as u64])),
             )
             .expect("phase spiral optimization failed");
 
@@ -1760,6 +1808,8 @@ impl PSpiralFitterND<12> {
                 },
                 &bounds,
                 self.warm_start.as_deref(),
+                self.seed
+                    .map(|seed| derive_seed(seed, &[2, winding as i8 as u64])),
             )
             .expect("phase spiral optimization failed");
 

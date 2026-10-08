@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from phasmix.fit import FitFailure, FitInput, FitSuccess, ParameterBounds, PSpiralFitter
+from phasmix.optimizers import TikTakConfig
 
 
 @pytest.mark.parametrize("workers", [1, 2, None])
@@ -57,6 +58,7 @@ def test_rust_batch_matches_single_fits(workers: int) -> None:
     fitter = PSpiralFitter(
         backend="rust",
         max_iterations=1,
+        optimizer=TikTakConfig(),
         bounds=ParameterBounds(alpha=0.0, b=0.05, c=0.0, theta0=0.0, scale_factor=40.0, rho=0.09),
     )
     inputs: list[FitInput] = []
@@ -110,6 +112,7 @@ def test_native_batch_releases_gil_after_copying() -> None:
     mesh = np.zeros_like(grid)
     fitter = _internal.PSpiralFitter(
         max_iterations=1,
+        optimizer=TikTakConfig(),
         bounds=[[(0.0, 0.0), (0.05, 0.05), (0.0, 0.0), (0.0, 0.0), (40.0, 40.0), (0.09, 0.09)]],
     )
     changed = Event()

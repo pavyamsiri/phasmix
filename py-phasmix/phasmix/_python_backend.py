@@ -10,6 +10,7 @@ from typing import Final, Literal, override
 
 import numpy as np
 from optype import numpy as onp
+from phasmix.optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
 from scipy import ndimage, optimize, special
 
 from phasmix._likelihood_utils import ln_likelihood
@@ -101,6 +102,10 @@ class PythonFitBackend(FitBackend):
         smoothing_func: _SmoothingFunc | SmoothConfig | None = None,
         mask_func: _MaskFunc | MaskConfig | None = None,
         bounds: ParameterBounds | Sequence[ParameterBounds] | None = None,
+        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"]
+        | DifferentialEvolutionConfig
+        | TikTakConfig
+        | NelderMeadConfig = "differential_evolution",
     ) -> None:
         """Initialize the fitter given the configuration.
 
@@ -152,6 +157,16 @@ class PythonFitBackend(FitBackend):
         # A single object broadcasts; explicit sequences select an ordered prefix.
         self._bounds: ParameterBounds | Sequence[ParameterBounds] = bounds if bounds is not None else ParameterBounds()
         self._local_maxiter: int | None = None
+
+        # Check optimizer
+        self._optimizer_config: DifferentialEvolutionConfig
+        if optimizer == "differential_evolution":
+            self._optimizer_config = DifferentialEvolutionConfig()
+        elif isinstance(optimizer, DifferentialEvolutionConfig):
+            self._optimizer_config = optimizer
+        else:
+            msg = f"Unsupported global optimizers for python backend: {optimizer}"
+            raise TypeError(msg)
 
     @property
     def local_optimizer_maxiter(self) -> int:
@@ -499,7 +514,28 @@ class PythonFitBackend(FitBackend):
                 nit=int(local.nit),
                 message=str(local.message),
             )
-        res = optimize.differential_evolution(objective, bounds=bounds, x0=guess, rng=rng)
+        strategy = self._optimizer_config.mutation
+        if self._optimizer_config.crossover == "binomial":
+            strategy += "bin"
+        elif self._optimizer_config.crossover == "exponential":
+            strategy += "exp"
+        else:
+            msg = f"Unsupported crossover strategy: {self._optimizer_config.crossover}"
+            raise ValueError(msg)
+        res = optimize.differential_evolution(
+            objective,
+            bounds=bounds,
+            x0=guess,
+            rng=rng,
+            strategy=strategy,
+            mutation=self._optimizer_config.mutation_factor,
+            recombination=self._optimizer_config.crossover_rate,
+            maxiter=self._optimizer_config.max_iter,
+            popsize=self._optimizer_config.pop_size_factor,
+            tol=self._optimizer_config.rtol,
+            atol=self._optimizer_config.atol,
+            init=self._optimizer_config.initializer,
+        )
         if not res.success:
             log.warning("Optimization did not converge: %s", res.message)
         return OptimizationResult(

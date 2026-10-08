@@ -307,12 +307,14 @@ impl BoundaryStrategy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DifferentialEvolutionConfig {
     /// Number of random population members per parameter, excluding the warm start.
     /// Must be at least six to support every mutation strategy in one dimension.
     pub pop_size_factor: usize,
     pub max_iter: usize,
+    /// Maximum iterations for projected Nelder--Mead polishing.
+    pub max_local_iter: usize,
     pub crossover_rate: f32,
     pub mutation_factor: f64,
     pub atol: f64,
@@ -328,6 +330,7 @@ impl default::Default for DifferentialEvolutionConfig {
         Self {
             pop_size_factor: MIN_POPULATION_SIZE,
             max_iter: 10,
+            max_local_iter: 200,
             crossover_rate: 0.7,
             mutation_factor: 0.5,
             atol: 0.0,
@@ -344,6 +347,7 @@ impl default::Default for DifferentialEvolutionConfig {
 pub struct DifferentialEvolution {
     pop_size_factor: usize,
     max_iter: usize,
+    max_local_iter: usize,
     crossover_rate: f32,
     mutation_factor: f64,
     atol: f64,
@@ -393,6 +397,7 @@ impl DifferentialEvolution {
         Ok(Self {
             pop_size_factor: config.pop_size_factor,
             max_iter: config.max_iter,
+            max_local_iter: config.max_local_iter,
             crossover_rate: config.crossover_rate,
             mutation_factor: config.mutation_factor,
             atol: config.atol,
@@ -493,6 +498,7 @@ impl DifferentialEvolution {
         best_member: Vec<f64>,
         best_cost: f64,
         nfev: u64,
+        max_local_iter: usize,
     ) -> Result<OptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
     where
         C: CostFunction<Param = Vec<f64>, Output = f64> + Clone + basin::BoxConstraints,
@@ -502,7 +508,7 @@ impl DifferentialEvolution {
             basin::NelderMead::standard().projected(),
             basin::BasicSimplexState::new(best_member.clone()),
         )
-        .max_iter(200)
+        .max_iter(max_local_iter as u64)
         .run()
         .map_err(OptimizationError::CostFunction)?;
         let nfev = nfev
@@ -719,7 +725,7 @@ impl DifferentialEvolution {
             .ok_or(DifferentialEvolutionError::EmptyPopulation)?;
 
         // Step 5: Polish best result
-        Self::polish(cost_func, best_member, best_cost, nfev)
+        Self::polish(cost_func, best_member, best_cost, nfev, self.max_local_iter)
     }
 }
 
@@ -1009,7 +1015,7 @@ mod warm_start_tests {
             evaluations: Arc::default(),
         };
         // Force the fallback independently of the local optimizer's convergence.
-        let result = DifferentialEvolution::polish(&objective, vec![15.0], -1.0, 0).unwrap();
+        let result = DifferentialEvolution::polish(&objective, vec![15.0], -1.0, 0, 200).unwrap();
         assert_eq!(result.params, vec![15.0]);
         assert_eq!(result.cost, -1.0);
     }

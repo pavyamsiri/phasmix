@@ -354,7 +354,8 @@ background-refinement iterations reuse the best fitted vector as a warm start.
 
 ## Rust local Nelder-Mead
 
-Use `PSpiralFitter(backend="rust", optimizer="nelder_mead", nelder_mead_maxiter=1500)`
+Use `PSpiralFitter(backend="rust", optimizer=NelderMeadConfig(max_iter=1500))`
+with `NelderMeadConfig` imported from `phasmix.optimizers`
 for one bounded local search per winding candidate. Supply `warm_start` and `num_components` for
 every fit, including batch items. This mode skips global sampling, removes fixed
 parameters from the simplex, and scales free parameters to their bounds. An

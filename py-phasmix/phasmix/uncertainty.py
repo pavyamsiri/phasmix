@@ -190,8 +190,8 @@ def bootstrap_uncertainty(
 
     Each replicate starts at the original estimate using a bounded local optimizer:
     scaled L-BFGS-B for Python or scaled Nelder-Mead for Rust. ``maxiter=None``
-    uses the backend budget: 500 for Python, or ``nelder_mead_maxiter`` for Rust
-    (1500 by default). An explicit ``maxiter`` overrides that budget.
+    uses the backend budget: 500 for Python, or the configured local iteration
+    budget for Rust (1500 by default). An explicit ``maxiter`` overrides that budget.
     No global searches or retries are performed in this experimental version.
     Failed/nonconverged draws remain in the result and are excluded from its
     explicitly qualified summaries. The original fitter and fit are unchanged.

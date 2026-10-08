@@ -9,12 +9,14 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from scipy import optimize
+
 from phasmix import BootstrapSamples, bootstrap_uncertainty
 from phasmix.bounds import ParameterBounds
 from phasmix.fit import FitSuccess, PSpiralFitter
 from phasmix.model import PSpiralModel
+from phasmix.optimizers import NelderMeadConfig
 from phasmix.uncertainty import _aligned  # pyright: ignore[reportPrivateUsage] -- test periodic component alignment.
-from scipy import optimize
 
 if TYPE_CHECKING:
     from phasmix.fit import PSpiralFitResult
@@ -199,7 +201,7 @@ def test_rust_two_component_bootstrap_centers_each_phase_independently() -> None
         ParameterBounds(alpha=float(row[0]), b=float(row[1]), c=float(row[2]), scale_factor=float(row[4]), rho=float(row[5]))
         for row in parameters
     )
-    fitter = PSpiralFitter(backend="rust", optimizer="nelder_mead", bounds=bounds, nelder_mead_maxiter=500)
+    fitter = PSpiralFitter(backend="rust", optimizer=NelderMeadConfig(max_iter=500), bounds=bounds)
     outcome = fitter.fit_spiral_with_background(
         counts, background, z, vz, num_components=2, winding=1, improve_background=False, warm_start=parameters.flatten()
     )
