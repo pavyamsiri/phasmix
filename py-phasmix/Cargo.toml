@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 argmin = { workspace = true }
+indicatif = { workspace = true }
 itertools = { workspace = true }
 pyo3 = { workspace = true }
 phasmix_core = { workspace = true }

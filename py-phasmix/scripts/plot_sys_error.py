@@ -17,7 +17,7 @@ from scipy import ndimage, stats
 from phasmix import fit
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.component import PSpiralComponent
-from phasmix.fit import FitInput, FitSuccess, PSpiralFitter
+from phasmix.fit import FitInput, FitSuccess, GaussianSmoothConfig, PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -116,12 +116,14 @@ def _generate_mock(alpha: float) -> MockData:
     z_samples = particles.x
     vz_samples = particles.y
 
-    density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
-    density = density.T
+    # density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
+    # density = density.T
 
     log.info("Generating initial background estimate via KDE...")
-    initial_background = ndimage.gaussian_filter(density, sigma=2)
-    initial_background = 0.5 * (initial_background + np.flipud(initial_background))
+    # initial_background = ndimage.gaussian_filter(density, sigma=2)
+    # initial_background = 0.5 * (initial_background + np.flipud(initial_background))
+    density = particles.density
+    initial_background = particles.background
     mask = fit.create_sigmoid_mask(1.0, 40.0)(x_mesh, y_mesh)
 
     phase = PSpiralComponent(
@@ -150,7 +152,17 @@ def _generate_mock(alpha: float) -> MockData:
 
 def main() -> None:
     """Generate mocks, fit them, and plot parameter recovery."""
-    fitter = PSpiralFitter(backend="rust", max_iterations=10)
+
+    x_edges = np.linspace(-1.2, 1.2, 100 + 1)
+    y_edges = np.linspace(-60.0, 60.0, 100 + 1)
+    dz: float = np.mean(np.diff(x_edges))
+    dvz: float = np.mean(np.diff(y_edges))
+    sigma_z = 0.1 / dz
+    sigma_vz = 5.0 / dvz
+
+    fitter = PSpiralFitter(
+        backend="rust", max_iterations=10, smoothing_func=GaussianSmoothConfig(z_scale=sigma_z, vz_scale=sigma_vz)
+    )
 
     true_alphas = np.linspace(0.0, 1.0, 25)
     actual_alphas = np.tile(true_alphas, 10)
@@ -178,7 +190,7 @@ def main() -> None:
             )
         )
     log.info("Starting fit...")
-    results = fitter.fit_batch(requests, workers=6)
+    results = fitter.fit_batch(requests, workers=6, progress=True)
     log.info("Fits complete...")
     for idx, result in enumerate(results):
         assert isinstance(result, FitSuccess)
@@ -207,10 +219,11 @@ def main() -> None:
         axes.plot(limits, limits, linestyle="--", color="k", label="Ideal")
         axes.grid(alpha=0.2)
 
-    alpha_axes.scatter(actual_alphas, measured_alphas, marker="x")
+    alpha_points = alpha_axes.scatter(actual_alphas, measured_alphas, marker="x", cmap="magma", c=actual_scales)
     alpha_axes.plot(true_alphas, corr_fit.slope * true_alphas + corr_fit.intercept, label="Linear fit")
     alpha_axes.set(xlabel=r"True $\alpha$", ylabel=r"Fitted $\alpha$")
     alpha_axes.legend()
+    fig.colorbar(alpha_points, ax=alpha_axes, label=r"True $S$")
 
     theta_points = theta_axes.scatter(actual_angles, measured_angles, marker="x", cmap="viridis", c=actual_alphas)
     theta_axes.set(

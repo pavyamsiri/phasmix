@@ -73,6 +73,7 @@ class PSpiralFitter:
         workers: int | None = None,
         options: Sequence[tuple[int | None, int | None, bool]] | None = None,
         warm_starts: Sequence[Sequence[float] | None] | None = None,
+        progress: bool = False,
     ) -> list[PSpiralFitResult]: ...
     def fit_spiral_with_background(
         self,

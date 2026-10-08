@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Generator, Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import copy
 from typing import Final, Literal, override
 
 import numpy as np
 from optype import numpy as onp
-from phasmix.optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
+from rich.progress import Progress
 from scipy import ndimage, optimize, special
 
 from phasmix._likelihood_utils import ln_likelihood
+from phasmix.optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
 
 from ._backends import (
     BackendEvent,
@@ -245,7 +246,9 @@ class PythonFitBackend(FitBackend):
         return self._bounds[:num_components]
 
     @override
-    def fit_batch(self, requests: Sequence[FitRequest], *, workers: int | None = None) -> list[BackendResult]:
+    def fit_batch(
+        self, requests: Sequence[FitRequest], *, workers: int | None = None, progress: bool = False
+    ) -> list[BackendResult]:
         """Fit independently in threads and collect terminal outcomes in input order.
 
         Each request owns its fitting state. Custom mask and smoothing callbacks
@@ -257,10 +260,22 @@ class PythonFitBackend(FitBackend):
             raise ValueError(msg)
         if not requests:
             return []
-        if workers == 1:
-            return [self.fit(request) for request in requests]
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            return list(executor.map(self.fit, requests))
+        with Progress(disable=not progress) as bar:
+            task = bar.add_task("Fitting batch", total=len(requests))
+            if workers == 1:
+                results = []
+                for request in requests:
+                    results.append(self.fit(request))
+                    bar.advance(task)
+                return results
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                if not progress:
+                    return list(executor.map(self.fit, requests))
+                futures = [executor.submit(self.fit, request) for request in requests]
+                for future in as_completed(futures):
+                    future.result()
+                    bar.advance(task)
+                return [future.result() for future in futures]
 
     @override
     def fit(

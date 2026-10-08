@@ -2,6 +2,7 @@ extern crate alloc;
 
 mod optimizer_config;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use numpy::{PyArray1, PyReadonlyArray1};
 use phasmix_core::{PSpiralComponent as RustComponent, PSpiralModel as RustModel};
 use phasmix_fit::{GlobalOptimizer, PSpiralFitter as RustFitter, PSpiralFitterND};
@@ -515,7 +516,7 @@ impl PSpiralFitter {
     }
 
     /// Copy a batch into Rust storage, then fit inside one shared Rayon pool.
-    #[pyo3(signature = (inputs, *, seeds, workers=None, options=None, warm_starts=None))]
+    #[pyo3(signature = (inputs, *, seeds, workers=None, options=None, warm_starts=None, progress=false))]
     pub fn fit_batch(
         &self,
         py: Python<'_>,
@@ -524,6 +525,7 @@ impl PSpiralFitter {
         workers: Option<usize>,
         options: Option<Vec<(Option<usize>, Option<i8>, bool)>>,
         warm_starts: Option<Vec<Option<Vec<f64>>>>,
+        progress: bool,
     ) -> PyResult<Vec<PSpiralFitResult>> {
         if workers == Some(0) {
             return Err(PyValueError::new_err("workers must be positive"));
@@ -594,22 +596,41 @@ impl PSpiralFitter {
             let pool = builder
                 .build()
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            Ok::<_, PyErr>(pool.install(|| {
+            let bar = if progress {
+                ProgressBar::new(owned.len() as u64).with_style(
+                    ProgressStyle::with_template(
+                        "Fitting batch [{bar:40.cyan/blue}] {pos}/{len} [{elapsed_precise}]",
+                    )
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?,
+                )
+            } else {
+                ProgressBar::hidden()
+            };
+            bar.tick();
+            let results = pool.install(|| {
                 owned
                     .par_iter()
                     .zip(&options)
                     .zip(&fitters)
                     .map(|(((arrays, shape), &(count, winding, improve)), fitter)| {
-                        fitter
+                        let result = fitter
                             .fit_spiral_with_background_iterative(
                                 &arrays[0], &arrays[1], &arrays[2], &arrays[3], &arrays[4], *shape,
                                 count, winding, improve,
                             )
                             .last()
-                            .ok_or_else(|| PyValueError::new_err("fit produced no checkpoints"))
+                            .ok_or_else(|| PyValueError::new_err("fit produced no checkpoints"));
+                        bar.inc(1);
+                        result
                     })
                     .collect::<PyResult<Vec<_>>>()
-            }))
+            });
+            if results.is_ok() {
+                bar.finish();
+            } else {
+                bar.abandon();
+            }
+            Ok::<_, PyErr>(results)
         })??;
         results
             .into_iter()

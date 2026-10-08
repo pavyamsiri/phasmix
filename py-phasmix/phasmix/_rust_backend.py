@@ -275,7 +275,9 @@ class RustFitBackend(FitBackend):
         return int(rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64, endpoint=True))
 
     @override
-    def fit_batch(self, requests: Sequence[FitRequest], *, workers: int | None = None) -> list[BackendResult]:
+    def fit_batch(
+        self, requests: Sequence[FitRequest], *, workers: int | None = None, progress: bool = False
+    ) -> list[BackendResult]:
         """Prepare grids, then fit the supported items in one native batch."""
         if workers is not None and (type(workers) is not int or workers < 1):
             msg = "workers must be a positive integer or None."
@@ -331,6 +333,7 @@ class RustFitBackend(FitBackend):
             native_results = self._rust_fitter.fit_batch(
                 inputs,
                 workers=workers,
+                progress=progress,
                 seeds=[self._fit_seed(requests[index]) for index in indices],
                 warm_starts=[
                     None if request.warm_start is None else request.warm_start.tolist()
