@@ -2,6 +2,7 @@ extern crate alloc;
 
 use crate::core::OptimizationResult;
 use crate::core::OrderedPoint;
+use crate::initialization::InitializationStrategy;
 use alloc::collections::BinaryHeap;
 use argmin_testfunctions::rosenbrock;
 use basin::CostFunction;
@@ -52,7 +53,7 @@ impl DynamicTikTak {
     ) -> Self {
         assert!(ndim > 0, "the search dimension must be greater than zero.");
         assert!(
-            log_num_samples <= 16,
+            log_num_samples < 16,
             "too much memory required for more than 2^16 samples."
         );
         assert!(
@@ -82,21 +83,9 @@ impl DynamicTikTak {
         let num_star = (f64::from(keep_ratio) * num_samples_f64)
             .ceil()
             .clamp(1.0, num_samples_f64) as usize;
-        let points = (0..num_samples)
-            .map(|i| {
-                let mut point = Vec::with_capacity(ndim);
-                let num_batches = ndim / 4 + 1;
-                for dimension_set in 0..num_batches {
-                    point.extend(
-                        sobol_burley::sample_4d(i as u32, dimension_set as u32, 0)
-                            .into_iter()
-                            .map(f64::from),
-                    );
-                }
-                point.truncate(ndim);
-                point
-            })
-            .collect();
+        let points = InitializationStrategy::Sobol
+            .generate_initial_population(num_samples, ndim, &mut rand::rng())
+            .expect("TikTak sampling must be within Sobol limits");
         Self {
             num_samples,
             num_star,
@@ -287,7 +276,7 @@ impl<const N: usize> TikTak<N> {
     ///
     /// # Panics
     /// This function assumes limits for the given parameters:
-    /// - `log_num_samples`: can not exceed `16` as that would require too much memory and needs to be greater than `0`.
+    /// - `log_num_samples`: must be less than `16` as that would require too much memory and needs to be greater than `0`.
     /// - `keep_ratio`: this is a percentage and so should be between 0 and 1.
     /// - `min_weight`: the minimum weight is `0.0`.
     /// - `max_weight`: the maximum weight is `1.0`.
@@ -299,7 +288,7 @@ impl<const N: usize> TikTak<N> {
         max_weight: f64,
     ) -> TikTak<N> {
         assert!(
-            log_num_samples <= 16,
+            log_num_samples < 16,
             "too much memory required for more than 2^16 samples."
         );
         assert!(
@@ -337,21 +326,9 @@ impl<const N: usize> TikTak<N> {
             .ceil()
             .clamp(1.0, num_samples_f64) as usize;
 
-        let points = (0..num_samples)
-            .map(|i| {
-                let mut point = Vec::with_capacity(ndim);
-                let num_batches = ndim / 4 + 1;
-                for dimension_set in 0..num_batches {
-                    point.extend(
-                        sobol_burley::sample_4d(i as u32, dimension_set as u32, 0)
-                            .into_iter()
-                            .map(f64::from),
-                    );
-                }
-                point.truncate(ndim);
-                point
-            })
-            .collect();
+        let points = InitializationStrategy::Sobol
+            .generate_initial_population(num_samples, ndim, &mut rand::rng())
+            .expect("TikTak sampling must be within Sobol limits");
 
         Self {
             num_samples,
@@ -596,6 +573,34 @@ pub fn run() -> Result<(), convert::Infallible> {
 #[cfg(test)]
 mod tests {
     use super::run;
+    use super::{DynamicTikTak, TikTak};
+    use crate::initialization::InitializationStrategy;
+    #[test]
+    fn both_variants_use_shared_sobol_points() {
+        let fixed = TikTak::<5>::new(3, 0.25, 0.1, 0.995);
+        let dynamic = DynamicTikTak::new(5, 3, 0.25, 0.1, 0.995);
+        let expected = InitializationStrategy::Sobol
+            .generate_initial_population(16, 5, &mut rand::rng())
+            .unwrap();
+        assert_eq!(
+            fixed.points, expected,
+            "fixed TikTak must use shared initialization"
+        );
+        assert_eq!(
+            dynamic.points, expected,
+            "dynamic TikTak must use shared initialization"
+        );
+        assert_eq!(
+            fixed.num_samples,
+            expected.len(),
+            "sample count must match points"
+        );
+        assert_eq!(
+            dynamic.num_samples,
+            expected.len(),
+            "sample count must match points"
+        );
+    }
     #[test]
     fn smoke() {
         assert!(run().is_ok());

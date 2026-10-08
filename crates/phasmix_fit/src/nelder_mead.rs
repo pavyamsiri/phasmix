@@ -3,7 +3,8 @@
 use super::{FitOptimizationResult, OptimizerDiagnostics};
 use basin::{BoxConstraints, CostFunction};
 use core::fmt;
-use phasmix_opt::differential_evolution::{DifferentialEvolutionError, OptimizationError};
+use phasmix_opt::core::OptimizationError;
+use phasmix_opt::differential_evolution::DifferentialEvolutionError;
 
 #[derive(Clone, Debug)]
 struct ScaledObjective<'prob, C> {
@@ -50,7 +51,7 @@ pub(super) fn minimize<C>(
     bounds: &[(f64, f64)],
     warm_start: Option<&[f64]>,
     max_iter: usize,
-) -> Result<FitOptimizationResult, OptimizationError<C::Error>>
+) -> Result<FitOptimizationResult, OptimizationError<C::Error, DifferentialEvolutionError>>
 where
     C: CostFunction<Param = Vec<f64>, Output = f64> + Clone + fmt::Debug + BoxConstraints,
     C::Error: fmt::Display,
@@ -69,7 +70,7 @@ where
     for (index, &(lower, upper)) in bounds.iter().enumerate() {
         if !lower.is_finite() || !upper.is_finite() || !(upper - lower).is_finite() || lower > upper
         {
-            return Err(DifferentialEvolutionError::InvalidBound { index }.into());
+            return Err(DifferentialEvolutionError::InvalidBounds.into());
         }
     }
     let free_indices: Vec<_> = bounds
@@ -246,7 +247,7 @@ mod tests {
         ] {
             assert!(matches!(
                 minimize(&objective, &bounds, start, 200),
-                Err(OptimizationError::DifferentialEvolution(
+                Err(OptimizationError::Optimizer(
                     DifferentialEvolutionError::InvalidWarmStart
                 ))
             ));

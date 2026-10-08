@@ -975,6 +975,7 @@ dependencies = [
  "argmin-observer-slog",
  "argmin_testfunctions",
  "basin",
+ "itertools 0.14.0",
  "ndarray 0.16.1",
  "phasmix_core",
  "rand 0.10.1",

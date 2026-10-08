@@ -48,12 +48,13 @@ fn main() {
     let mock_result = model.mock_grid(&x_edges, &y_edges, 1_000_000);
 
     let tiktak1d =
-        phasmix_tiktak::TikTak::<6>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
+        phasmix_opt::tiktak::TikTak::<6>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let tiktak2d =
-        phasmix_tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
+        phasmix_opt::tiktak::TikTak::<12>::new(4096u32.ilog2() as u8, 128.0f32.recip(), 0.1, 0.995);
     let fitter = PSpiralFitter {
         fitter_single: PSpiralFitterND {
             warm_start: None,
+            seed: None,
             parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(tiktak1d),
             alpha_bounds: (0.0, 1.0),
@@ -65,6 +66,7 @@ fn main() {
         },
         fitter_double: PSpiralFitterND {
             warm_start: None,
+            seed: None,
             parameter_bounds: None,
             optimizer: GlobalOptimizer::TikTak(tiktak2d),
             alpha_bounds: (0.0, 1.0),

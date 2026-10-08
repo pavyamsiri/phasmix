@@ -16,6 +16,7 @@ sobol = { workspace = true }
 sobol_burley = { workspace = true }
 phasmix_core = { workspace = true }
 thiserror = { workspace = true }
+itertools = { workspace = true }
 
 [lints]
 workspace = true

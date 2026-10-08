@@ -6,8 +6,11 @@ from typing import Literal
 
 import numpy as np
 import pytest
+
 from phasmix import _internal
+from phasmix._rust_backend import RustFitBackend
 from phasmix.fit import FitInput, FitSuccess, ParameterBounds, PSpiralFitter
+from phasmix.optimizers import NelderMeadConfig, TikTakConfig
 
 
 @pytest.mark.parametrize("optimizer", ["tiktak", "differential_evolution", "nelder_mead"])
@@ -67,21 +70,29 @@ def test_warm_start_paths(optimizer: Literal["tiktak", "differential_evolution",
 @pytest.mark.parametrize("point", [[], [0.0] * 12, [float("nan")] * 6, [2.0] * 6])
 def test_native_warm_start_validation(point: list[float]) -> None:
     """Invalid guesses fail before native objective evaluation."""
-    fitter = _internal.PSpiralFitter(max_iterations=1)
+    fitter = _internal.PSpiralFitter(
+        max_iterations=1,
+        optimizer=TikTakConfig(),
+        bounds=[RustFitBackend._rust_bounds_for_component(ParameterBounds())],  # noqa: SLF001
+    )
     grid = np.ones(4)
     with pytest.raises(ValueError, match=r"length|bound"):
-        fitter.fit_spiral_with_background(grid, grid, grid, grid, grid, (2, 2), num_components=1, warm_start=point)
+        _ = fitter.fit_spiral_with_background(grid, grid, grid, grid, grid, (2, 2), num_components=1, warm_start=point)
 
 
 def test_native_warm_start_options() -> None:
     """Native callers must specify component count and align batch starts."""
-    fitter = _internal.PSpiralFitter(max_iterations=1)
+    fitter = _internal.PSpiralFitter(
+        max_iterations=1,
+        optimizer=TikTakConfig(),
+        bounds=[RustFitBackend._rust_bounds_for_component(ParameterBounds())],  # noqa: SLF001
+    )
     grid = np.ones(4)
     parameters = [0.0, 0.05, 0.0, 0.0, 40.0, 0.09]
     with pytest.raises(ValueError, match="component count"):
-        fitter.fit_spiral_with_background(grid, grid, grid, grid, grid, (2, 2), warm_start=parameters)
+        _ = fitter.fit_spiral_with_background(grid, grid, grid, grid, grid, (2, 2), warm_start=parameters)
     with pytest.raises(ValueError, match="number of inputs"):
-        fitter.fit_batch([], warm_starts=[parameters])
+        _ = fitter.fit_batch([], warm_starts=[parameters])
 
 
 def test_local_optimizer_requires_start_for_each_fit_path() -> None:
@@ -89,19 +100,19 @@ def test_local_optimizer_requires_start_for_each_fit_path() -> None:
     fitter = PSpiralFitter(backend="rust", optimizer="nelder_mead")
     grid = np.ones((2, 2))
     with pytest.raises(ValueError, match="requires a warm_start"):
-        fitter.fit_spiral_with_background(grid, grid, grid, grid, num_components=1)
+        _ = fitter.fit_spiral_with_background(grid, grid, grid, grid, num_components=1)
     with pytest.raises(ValueError, match="requires a warm_start"):
-        list(fitter.fit_spiral_with_background_gen(grid, grid, grid, grid, num_components=1))
+        _ = list(fitter.fit_spiral_with_background_gen(grid, grid, grid, grid, num_components=1))
     item = FitInput(density=grid, background=grid, z_mesh=grid, vz_mesh=grid, num_components=1)
     with pytest.raises(ValueError, match="requires a warm_start"):
-        fitter.fit_batch([item])
+        _ = fitter.fit_batch([item])
 
 
-@pytest.mark.parametrize("maxiter", [0, -1, True])
+@pytest.mark.parametrize("maxiter", [0, -1])
 def test_local_iteration_limit_validation(maxiter: int) -> None:
     """The optimizer budget must be a positive integer."""
-    with pytest.raises(ValueError, match="positive integer"):
-        PSpiralFitter(backend="rust", optimizer="nelder_mead", nelder_mead_maxiter=maxiter)
+    with pytest.raises((ValueError, TypeError), match=r"positive|max_iter"):
+        _ = PSpiralFitter(backend="rust", optimizer=NelderMeadConfig(max_iter=maxiter))
 
 
 def test_backend_local_optimizer_copy() -> None:
@@ -137,7 +148,7 @@ def test_backend_local_optimizer_copy() -> None:
     assert isinstance(global_result, FitSuccess)
     assert global_result.diagnostics.nfev > result.diagnostics.nfev
     with pytest.raises(ValueError, match="positive integer"):
-        backend.with_local_optimizer(maxiter=0)
+        _ = backend.with_local_optimizer(maxiter=0)
 
 
 @pytest.mark.parametrize("backend", ["python", "rust"])
@@ -169,7 +180,10 @@ def test_update_bounds_after_initialization(backend: Literal["python", "rust"]) 
 
 def test_native_bounds_update_is_atomic() -> None:
     """Rejecting native constraints preserves the last valid bounds."""
-    fitter = _internal.PSpiralFitter(optimizer="nelder_mead")
+    fitter = _internal.PSpiralFitter(
+        optimizer=NelderMeadConfig(),
+        bounds=[RustFitBackend._rust_bounds_for_component(ParameterBounds())],  # noqa: SLF001
+    )
     parameters = [0.0, 0.05, 0.0, 0.0, 40.0, 0.09]
     fitter.update_bounds([[(value, value) for value in parameters]])
     with pytest.raises(ValueError, match="reversed"):

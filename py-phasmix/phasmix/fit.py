@@ -37,9 +37,12 @@ if TYPE_CHECKING:
 
     from optype import numpy as onp
 
+    from .optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
+
 
 type _SmoothingFunc = Callable[[onp.Array2D[np.float64]], onp.Array2D[np.float64]]
 type _MaskFunc = Callable[[onp.Array2D[np.float64], onp.Array2D[np.float64]], onp.Array2D[np.float64]]
+type _OptimizerName = Literal["tiktak", "differential_evolution", "nelder_mead"]
 
 __all__: list[str] = [
     "FitEvent",
@@ -78,7 +81,7 @@ class FitInput:
     have different shapes. Arrays are retained by reference; do not mutate
     them during fitting. Options have the same meanings as in
     ``fit_spiral_with_background``. Supply a separate random generator for
-    each item when reproducible Python optimization is required.
+    each item when reproducible optimization is required.
     """
 
     density: onp.Array2D[np.float64]
@@ -99,8 +102,7 @@ class PSpiralFitter:
         self,
         *,
         backend: Literal["python", "rust"] = "python",
-        optimizer: Literal["tiktak", "differential_evolution", "nelder_mead"] | None = None,
-        nelder_mead_maxiter: int = 1500,
+        optimizer: _OptimizerName | DifferentialEvolutionConfig | TikTakConfig | NelderMeadConfig | None = None,
         max_iterations: int | None = 50,
         atol: float = 0.0,
         rtol: float = 0.0,
@@ -118,14 +120,13 @@ class PSpiralFitter:
         optimizer : {"tiktak", "differential_evolution", "nelder_mead"} | None
             None preserves the backend default: SciPy differential evolution for
             Python, TikTak for Rust. The Rust backend supports all three optimizers;
-            its differential evolution uses 15 members per parameter, at most 100
-            generations, and projected Nelder-Mead polishing. Python supports
+            optimizer dataclasses configure its search strategies and budgets.
+            DifferentialEvolutionConfig defaults to 6 members per parameter,
+            at most 100 generations, and 1500 projected Nelder-Mead polishing
+            iterations. Python supports
             differential evolution only, with its existing SciPy settings.
             Rust nelder_mead performs one bounded local search per winding candidate and requires a
             warm_start and an explicit num_components for every fit.
-        nelder_mead_maxiter : int
-            Positive iteration limit for Rust's local-only Nelder-Mead optimizer.
-            Default 1500. Separate from background-refinement max_iterations.
         max_iterations : int | None
             Maximum number of refinement attempts, excluding the initial fit.
             Default 50. Zero retains the initial fit; None imposes no iteration
@@ -153,15 +154,13 @@ class PSpiralFitter:
         """
         self._backend: FitBackend
         if backend == "python":
-            if optimizer not in (None, "differential_evolution"):
-                msg = "The Python backend supports only differential_evolution."
-                raise ValueError(msg)
             self._backend = PythonFitBackend(
                 max_iterations=max_iterations,
                 atol=atol,
                 rtol=rtol,
                 smoothing_func=smoothing_func,
                 mask_func=mask_func,
+                optimizer=optimizer if optimizer is not None else "differential_evolution",
                 bounds=bounds,
             )
         elif backend == "rust":
@@ -173,7 +172,6 @@ class PSpiralFitter:
                 mask_func=mask_func,
                 bounds=bounds,
                 optimizer=optimizer if optimizer is not None else "tiktak",
-                nelder_mead_maxiter=nelder_mead_maxiter,
             )
         else:
             msg = "Only `python` and `rust` backends are currently supported."  # pyright: ignore[reportUnreachable]
@@ -480,8 +478,10 @@ class PSpiralFitter:
             intervals and seed one member of the DE population. This does not
             resume optimizer state. Later refinements reuse the accepted model.
         rng : np.random.Generator | None
-            Random generator shared by selection and refinement. If None, a new
-            generator is created. Pass np.random.default_rng(seed) to reproduce a fit.
+            Random generator for optimization. If None, a new generator is
+            created. Rust consumes one uint64 per fit, then derives seeds for
+            selection and refinement. Pass a fresh np.random.default_rng(seed)
+            to reproduce a fit within the same backend and software build.
         num_components : int | None
             One or two components, or None to compare one and two components
             on the initial background using BIC and their free-parameter counts.
@@ -536,12 +536,12 @@ class PSpiralFitter:
         warm_start: onp.Array1D[np.float64] | None,
     ) -> None:
         if num_components is not None and (
-            isinstance(num_components, bool) or not isinstance(num_components, (int, np.integer)) or num_components not in (1, 2)
+            isinstance(num_components, bool) or not isinstance(num_components, (int, np.integer)) or num_components not in (1, 2)  # pyright: ignore[reportUnnecessaryIsInstance]
         ):
             msg = "`num_components` must be 1 or 2, or `None`; check component bounds."
             raise ValueError(msg)
         if winding is not None and (
-            isinstance(winding, bool) or not isinstance(winding, (int, np.integer)) or winding not in (-1, 1)
+            isinstance(winding, bool) or not isinstance(winding, (int, np.integer)) or winding not in (-1, 1)  # pyright: ignore[reportUnnecessaryIsInstance]
         ):
             msg = "winding must be -1 or 1, or None."
             raise ValueError(msg)

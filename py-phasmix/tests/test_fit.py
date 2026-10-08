@@ -78,7 +78,7 @@ def test_rust_backend_can_be_selected() -> None:
 
 def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """The adapter constructs the native fitter with backend-neutral options."""
-    from phasmix import _internal  # noqa: PLC0415 -- optional extension is only needed by this test.
+    from phasmix.optimizers import TikTakConfig  # noqa: PLC0415 -- inspect normalized configuration.
 
     calls: list[dict[str, object]] = []
 
@@ -86,7 +86,7 @@ def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.M
         def __init__(self, **kwargs: object) -> None:
             calls.append(kwargs)
 
-    monkeypatch.setattr(_internal, "PSpiralFitter", FakeRustFitter)
+    monkeypatch.setattr("phasmix._rust_backend.RustPSpiralFitter", FakeRustFitter)
     backend = RustFitBackend(
         max_iterations=7,
         atol=1e-3,
@@ -97,7 +97,17 @@ def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.M
     )
 
     assert isinstance(backend._rust_fitter, FakeRustFitter)  # noqa: SLF001 -- test the adapter boundary.
-    assert calls == [{"max_iterations": 7, "atol": 1e-3, "rtol": 2e-3}]
+    assert calls == [
+        {
+            "max_iterations": 7,
+            "atol": 1e-3,
+            "rtol": 2e-3,
+            "sigma_z": 2.0,
+            "sigma_vz": 2.0,
+            "bounds": (RustFitBackend._rust_bounds_for_component(ParameterBounds()),),  # noqa: SLF001
+            "optimizer": TikTakConfig(),
+        }
+    ]
 
 
 def test_rust_backend_rejects_python_callbacks() -> None:

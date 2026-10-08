@@ -3,6 +3,8 @@ from collections.abc import Sequence
 import numpy as np
 from optype import numpy as onp
 
+from .optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
+
 def ln_likelihood_f64(
     data: onp.Array1D[np.float64], prediction: onp.Array1D[np.float64], mask: onp.Array1D[np.float64]
 ) -> float: ...
@@ -48,10 +50,9 @@ class PSpiralFitter:
         rtol: float = 0.0,
         sigma_z: float = 2.0,
         sigma_vz: float = 2.0,
-        bounds: Sequence[Sequence[tuple[float, float]]] | None = None,
         *,
-        optimizer: str = "tiktak",
-        nelder_mead_maxiter: int = 1500,
+        bounds: Sequence[Sequence[tuple[float, float]]],
+        optimizer: DifferentialEvolutionConfig | TikTakConfig | NelderMeadConfig,
     ) -> None: ...
     def update_bounds(self, bounds: Sequence[Sequence[tuple[float, float]]]) -> None: ...
     def with_local_optimizer(self, *, maxiter: int = 1500) -> PSpiralFitter: ...
@@ -68,6 +69,7 @@ class PSpiralFitter:
             ]
         ],
         *,
+        seeds: Sequence[int],
         workers: int | None = None,
         options: Sequence[tuple[int | None, int | None, bool]] | None = None,
         warm_starts: Sequence[Sequence[float] | None] | None = None,
@@ -81,6 +83,7 @@ class PSpiralFitter:
         mesh_y: onp.Array1D[np.float64],
         shape: tuple[int, int],
         *,
+        seed: int,
         num_components: int | None = None,
         winding: int | None = None,
         improve_background: bool = True,
@@ -95,6 +98,7 @@ class PSpiralFitter:
         mesh_y: onp.Array1D[np.float64],
         shape: tuple[int, int],
         *,
+        seed: int,
         num_components: int | None = None,
         winding: int | None = None,
         improve_background: bool = True,
