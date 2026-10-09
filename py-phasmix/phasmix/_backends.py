@@ -310,7 +310,9 @@ class FitBackend(Protocol):
     def with_local_optimizer(self, *, maxiter: int) -> FitBackend: ...
 
     def fit(self, request: FitRequest) -> BackendResult: ...
-    def fit_batch(self, requests: Sequence[FitRequest], *, workers: int | None = None) -> list[BackendResult]:
+    def fit_batch(
+        self, requests: Sequence[FitRequest], *, workers: int | None = None, progress: bool = False
+    ) -> list[BackendResult]:
         """Return one terminal outcome per request, in input order."""
         ...
 

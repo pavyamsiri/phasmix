@@ -185,7 +185,7 @@ class PSpiralFitter:
         """
         self._backend.update_bounds(bounds)
 
-    def fit_batch(self, inputs: Sequence[FitInput], *, workers: int | None = None) -> list[FitOutcome]:
+    def fit_batch(self, inputs: Sequence[FitInput], *, workers: int | None = None, progress: bool = False) -> list[FitOutcome]:
         """Fit prepared grids as a batch using the configured backend.
 
         Parameters
@@ -199,6 +199,10 @@ class PSpiralFitter:
             batch fitting and inner optimization. Python uses a thread pool;
             None uses ThreadPoolExecutor's default worker count. Python control
             flow remains subject to the GIL on GIL-enabled interpreters.
+        progress : bool
+            Show a progress bar counting completed fits. Defaults to False.
+            Rust counts items submitted to native fitting; inputs rejected
+            during Python preparation are excluded from its progress total.
 
         Returns
         -------
@@ -236,7 +240,7 @@ class PSpiralFitter:
             )
             for item in inputs
         ]
-        return self._backend.fit_batch(requests, workers=workers)
+        return self._backend.fit_batch(requests, workers=workers, progress=progress)
 
     def fit_spiral(
         self,

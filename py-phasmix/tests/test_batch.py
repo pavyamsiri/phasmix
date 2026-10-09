@@ -10,7 +10,8 @@ from phasmix.optimizers import TikTakConfig
 
 
 @pytest.mark.parametrize("workers", [1, 2, None])
-def test_batch_preserves_results_and_failures(workers: int | None) -> None:
+@pytest.mark.parametrize("progress", [False, True])
+def test_batch_preserves_results_and_failures(workers: int | None, *, progress: bool, capsys: pytest.CaptureFixture[str]) -> None:
     """Independent real fits retain input order and failures retain their slot."""
     fitter = PSpiralFitter(bounds=ParameterBounds(alpha=0.0, b=0.05, c=0.0, theta0=0.0, scale_factor=40.0, rho=0.09))
     background = np.ones((2, 3))
@@ -27,7 +28,7 @@ def test_batch_preserves_results_and_failures(workers: int | None) -> None:
         )
         for count in (2, 0, 3)
     ]
-    results = fitter.fit_batch(inputs, workers=workers)
+    results = fitter.fit_batch(inputs, workers=workers, progress=progress)
     assert len(results) == 3
     assert isinstance(results[1], FitFailure)
     for index in (0, 2):
@@ -37,6 +38,12 @@ def test_batch_preserves_results_and_failures(workers: int | None) -> None:
         assert result.result.lnl == 0.0
         assert result.diagnostics.nfev == 1
     np.testing.assert_array_equal(background, np.ones((2, 3)))
+    output = capsys.readouterr().out
+    if progress:
+        assert "Fitting batch" in output
+        assert "100%" in output
+    else:
+        assert output == ""
 
 
 def test_empty_batch() -> None:
@@ -53,7 +60,8 @@ def test_batch_propagates_invalid_input() -> None:
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_rust_batch_matches_single_fits(workers: int) -> None:
+@pytest.mark.parametrize("progress", [False, True])
+def test_rust_batch_matches_single_fits(workers: int, *, progress: bool) -> None:
     """Native batches preserve order and match the existing single-fit path."""
     fitter = PSpiralFitter(
         backend="rust",
@@ -77,7 +85,7 @@ def test_rust_batch_matches_single_fits(workers: int) -> None:
         )
     grid = np.ones((2, 2))
     unsupported = FitInput(density=grid, background=grid, z_mesh=grid, vz_mesh=grid, num_components=3)
-    results = fitter.fit_batch([inputs[0], unsupported, inputs[1]], workers=workers)
+    results = fitter.fit_batch([inputs[0], unsupported, inputs[1]], workers=workers, progress=progress)
     assert isinstance(results[1], FitFailure)
     for item, result in zip(inputs, (results[0], results[2]), strict=True):
         single = fitter.fit_spiral_with_background(
@@ -98,7 +106,7 @@ def test_rust_batch_matches_single_fits(workers: int) -> None:
         np.testing.assert_array_equal(result.result.final_model.parameters, single.result.final_model.parameters)
         assert result.result.lnl == single.result.lnl
         assert result.diagnostics.nfev == single.diagnostics.nfev
-    assert fitter.fit_batch([], workers=workers) == []
+    assert fitter.fit_batch([], workers=workers, progress=progress) == []
 
 
 def test_native_batch_releases_gil_after_copying() -> None:
@@ -128,7 +136,7 @@ def test_native_batch_releases_gil_after_copying() -> None:
         # from making a GIL-holding native call look like it released the GIL.
         sys.setswitchinterval(10.0)
         timer.start()
-        results = fitter.fit_batch([(grid, grid, np.ones_like(grid), mesh, mesh, (128, 128))], workers=1)
+        results = fitter.fit_batch([(grid, grid, np.ones_like(grid), mesh, mesh, (128, 128))], seeds=[0], workers=1)
         ran_during_fit = changed.is_set()
     finally:
         sys.setswitchinterval(previous_interval)
