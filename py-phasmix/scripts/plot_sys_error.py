@@ -73,7 +73,6 @@ class MockData:
     vz: onp.Array1D[np.float64]
     phase: float
     scale_factor: float
-    amp_bg: float
 
 
 def _generate_mock(alpha: float) -> MockData:
@@ -83,9 +82,9 @@ def _generate_mock(alpha: float) -> MockData:
     theta = rng.uniform(-np.pi, np.pi, size=1)[0]
     scale_factor_sig = rng.uniform(30.0, 70.0, size=1)[0]
     scale_factor_bg = rng.uniform(30.0, 70.0, size=1)[0]
-    amp_bg = rng.uniform(0.01, 10.0, size=1)[0]
     sigma_bg = rng.uniform(0.01, 5.0, size=1)[0]
     rho = rng.uniform(0.0, 0.18, size=1)[0]
+    num_particles: int = int(rng.integers(1_000, 500_000, size=1)[0])
     signal1 = AlinderComponent(
         alpha=alpha,
         b=b,
@@ -95,7 +94,7 @@ def _generate_mock(alpha: float) -> MockData:
         rho=rho,
         winding=1,
     )
-    background_comp = GaussianComponent(x_scale=1, y_scale=scale_factor_bg, amplitude=amp_bg, variance=sigma_bg)
+    background_comp = GaussianComponent(x_scale=1, y_scale=scale_factor_bg, amplitude=1.0, variance=sigma_bg)
 
     mock_model = MockModel(
         (signal1,),
@@ -107,23 +106,30 @@ def _generate_mock(alpha: float) -> MockData:
     x_edges = np.linspace(-1.2, 1.2, num_x_bins + 1)
     y_edges = np.linspace(-60.0, 60.0, num_y_bins + 1)
 
+    dz: float = np.mean(np.diff(x_edges))
+    dvz: float = np.mean(np.diff(y_edges))
+
     x_centres = 0.5 * (x_edges[:-1] + x_edges[1:])
     y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
     x_mesh, y_mesh = np.meshgrid(x_centres, y_centres)
 
-    num_particles: int = 100_000
     particles = mock_model.mock_particles(num_particles, x_edges, y_edges)
     z_samples = particles.x
     vz_samples = particles.y
 
-    # density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
-    # density = density.T
+    density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
+    density = density.T
 
     log.info("Generating initial background estimate via KDE...")
-    # initial_background = ndimage.gaussian_filter(density, sigma=2)
-    # initial_background = 0.5 * (initial_background + np.flipud(initial_background))
-    density = particles.density
-    initial_background = particles.background
+    factor = (2 * num_particles) ** (-1 / 6)
+    std_z_mirrored = np.sqrt(2 * np.sum((z_samples - np.mean(z_samples)) ** 2) / (2 * num_particles - 1))
+    std_vz_mirrored = np.sqrt(2 * np.sum(vz_samples**2) / (2 * num_particles - 1))
+
+    hz = factor * std_z_mirrored
+    hvz = factor * std_vz_mirrored
+
+    initial_background = ndimage.gaussian_filter(density, sigma=(hvz / dvz, hz / dz))
+    initial_background = 0.5 * (initial_background + np.flipud(initial_background))
     mask = fit.create_sigmoid_mask(1.0, 40.0)(x_mesh, y_mesh)
 
     phase = PSpiralComponent(
@@ -146,13 +152,11 @@ def _generate_mock(alpha: float) -> MockData:
         vz=vz_samples,
         phase=phase,
         scale_factor=scale_factor_sig,
-        amp_bg=amp_bg,
     )
 
 
 def main() -> None:
     """Generate mocks, fit them, and plot parameter recovery."""
-
     x_edges = np.linspace(-1.2, 1.2, 100 + 1)
     y_edges = np.linspace(-60.0, 60.0, 100 + 1)
     dz: float = np.mean(np.diff(x_edges))
@@ -171,13 +175,11 @@ def main() -> None:
     measured_alphas = np.zeros_like(actual_alphas)
     measured_thetas = np.zeros_like(actual_thetas)
     measured_scales = np.zeros_like(actual_scales)
-    actual_bg_amp = np.zeros_like(actual_scales)
     requests: list[FitInput] = []
     for idx, alpha in enumerate(actual_alphas):
         data = _generate_mock(alpha)
         actual_thetas[idx] = data.phase
         actual_scales[idx] = data.scale_factor
-        actual_bg_amp[idx] = data.amp_bg
         requests.append(
             FitInput(
                 density=data.density,
@@ -216,19 +218,18 @@ def main() -> None:
         (scale_axes, actual_scales),
     ):
         limits = (values.min(), values.max())
-        axes.plot(limits, limits, linestyle="--", color="k", label="Ideal")
+        axes.plot(limits, limits, linestyle="--", color="k")
         axes.grid(alpha=0.2)
 
     alpha_points = alpha_axes.scatter(actual_alphas, measured_alphas, marker="x", cmap="magma", c=actual_scales)
-    alpha_axes.plot(true_alphas, corr_fit.slope * true_alphas + corr_fit.intercept, label="Linear fit")
-    alpha_axes.set(xlabel=r"True $\alpha$", ylabel=r"Fitted $\alpha$")
-    alpha_axes.legend()
+    alpha_axes.plot(true_alphas, corr_fit.slope * true_alphas + corr_fit.intercept, color="tab:blue", ls="-.")
+    alpha_axes.set(xlabel=r"$\alpha_{\mathrm{true}}$", ylabel=r"$\hat{\alpha}$")
     fig.colorbar(alpha_points, ax=alpha_axes, label=r"True $S$")
 
     theta_points = theta_axes.scatter(actual_angles, measured_angles, marker="x", cmap="viridis", c=actual_alphas)
     theta_axes.set(
-        xlabel="True phase (degrees)",
-        ylabel=r"Fitted $\theta_0$ (degrees)",
+        xlabel=r"$\theta_{\mathrm{model}, true} \,\, (\mathrm{deg})$",
+        ylabel=r"$\hat{\theta}_{\mathrm{model}} \,\, (\mathrm{deg})$",
         xlim=(-180, 180),
         ylim=(-180, 180),
         xticks=(-180, -90, 0, 90, 180),
@@ -237,9 +238,13 @@ def main() -> None:
     fig.colorbar(theta_points, ax=theta_axes, label=r"True $\alpha$")
 
     scale_points = scale_axes.scatter(actual_scales, measured_scales, c=actual_alphas, cmap="viridis", marker="x")
-    scale_axes.set(xlabel="True scale factor", ylabel="Fitted scale factor")
+    scale_axes.set(
+        xlabel=r"$S_{\mathrm{true}} \,\, (\mathrm{km}/\mathrm{s}/\mathrm{kpc})$",
+        ylabel=r"$\hat{S} \,\, (\mathrm{km}/\mathrm{s}/\mathrm{kpc})$",
+    )
     fig.colorbar(scale_points, ax=scale_axes, label=r"True $\alpha$")
 
+    plt.savefig("sys_error.png")
     plt.show()
     plt.close(fig)
 
