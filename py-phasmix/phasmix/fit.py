@@ -28,8 +28,8 @@ from ._backends import (
     SigmoidMaskConfig,
     SmoothConfig,
 )
-from ._background_utils import generate_initial_background
 from ._python_backend import create_gaussian_smoother, create_sigmoid_mask
+from .background_estimators import BackgroundEstimator, estimate_kde_background_vz_mirrored
 from .bounds import Fixed, Interval, ParameterBounds
 
 if TYPE_CHECKING:
@@ -254,6 +254,7 @@ class PSpiralFitter:
         rng: np.random.Generator | None = None,
         num_components: int | None = None,
         improve_background: bool = True,
+        background_estimator: BackgroundEstimator | None = None,
     ) -> BackendResult:
         """Bin samples, estimate their background, and return a terminal outcome.
 
@@ -277,6 +278,8 @@ class PSpiralFitter:
             One or two components, or None to compare both using BIC.
         improve_background : bool
             Whether to refine after obtaining the initial fit. Default True.
+        background_estimator : BackgroundEstimator | None
+            A function to estimate the background with the signature (z, vz, z_mesh, vz_mesh).
 
         Returns
         -------
@@ -301,6 +304,7 @@ class PSpiralFitter:
                 rng=rng,
                 num_components=num_components,
                 improve_background=improve_background,
+                background_estimator=background_estimator,
             )
         )
         assert val is not None
@@ -319,6 +323,7 @@ class PSpiralFitter:
         rng: np.random.Generator | None = None,
         num_components: int | None = None,
         improve_background: bool = True,
+        background_estimator: BackgroundEstimator | None = None,
     ) -> Generator[BackendEvent]:
         """Lazily bin samples and yield fit events.
 
@@ -364,28 +369,27 @@ class PSpiralFitter:
             yield self._unusable_data("At least two samples are required for background estimation.")
             return
 
+        estimator = background_estimator if background_estimator is not None else estimate_kde_background_vz_mirrored
+
         z_centres = 0.5 * (z_bins[:-1] + z_bins[1:])
         vz_centres = 0.5 * (vz_bins[:-1] + vz_bins[1:])
         z_mesh, vz_mesh = np.meshgrid(z_centres, vz_centres)
         density, _, _ = np.histogram2d(z, vz, bins=(z_bins, vz_bins), density=False)
         density = density.T
+
         if not np.any(density > 0):
             yield self._unusable_data("No samples fall inside the fitting region.")
             return
         try:
-            background = generate_initial_background(z, vz, z_mesh, vz_mesh)
+            background = estimator(z, vz, z_bins, vz_bins)
         except np.linalg.LinAlgError as exc:
             yield self._unusable_data(f"KDE background estimation failed: {exc}")
             return
-        # Midpoint density times bin area approximates probability mass.
-        # Rows follow vz and columns follow z, matching the transposed counts.
-        background = background * np.diff(vz_bins)[:, None] * np.diff(z_bins)[None, :]
+
         if not self._valid_background(background):
             yield self._unusable_data("KDE produced an invalid background.")
             return
-        # Normalize over the fitting region to match its observed count total.
-        if np.sum(background) > 0:
-            background = background / np.sum(background) * np.sum(density)
+
         yield from self.fit_spiral_with_background_gen(
             density,
             background,

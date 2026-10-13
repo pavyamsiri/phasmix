@@ -9,16 +9,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-from phasmix import bootstrap_uncertainty, fit
-from phasmix._background_utils import generate_initial_background
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.bounds import Fixed, Interval, ParameterBounds
-from phasmix.fit import FitSuccess, PSpiralFitter
 from phasmock.component import AlinderComponent, GaussianComponent
 from phasmock.mock import MockModel
 from rich.console import Console
 from rich.logging import RichHandler
 from scipy import optimize
+
+from phasmix import bootstrap_uncertainty, fit
+from phasmix._likelihood_utils import ln_likelihood
+from phasmix.background_estimators import estimate_kde_background_vz_mirrored
+from phasmix.bounds import Fixed, Interval, ParameterBounds
+from phasmix.fit import FitSuccess, PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -108,9 +109,7 @@ def _generate_mock() -> MockData:
     density = density.T
 
     log.info("Generating initial background estimate via KDE...")
-    initial_background = generate_initial_background(z_samples, vz_samples, x_mesh, y_mesh)
-    # Normalize initial background
-    initial_background = initial_background / np.sum(initial_background) * np.sum(density)
+    initial_background = estimate_kde_background_vz_mirrored(z_samples, vz_samples, x_edges, y_edges)
 
     mask = fit.create_sigmoid_mask(1.0, 40.0)(x_mesh, y_mesh)
 

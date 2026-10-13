@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmix.optimizers import DifferentialEvolutionConfig
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
@@ -19,6 +18,7 @@ from rich.logging import RichHandler
 
 from phasmix import bootstrap_uncertainty, fit, profile_likelihood
 from phasmix._likelihood_utils import ln_likelihood
+from phasmix.background_estimators import estimate_gaussian_smooth_background_vz_mirrored
 from phasmix.fit import PSpiralFitter
 
 if TYPE_CHECKING:
@@ -87,12 +87,13 @@ def _generate_mock() -> MockData:
     log.info("Generating initial background estimate via KDE...")
     background_model = MockModel(signal=[], background=smoke_recipe.model.background)
     particles = background_model.mock_particles(
-        smoke_recipe.num_samples, x_edges=smoke_recipe.x_edges, y_edges=smoke_recipe.y_edges, rng=None
+        smoke_recipe.num_samples, x_edges=smoke_recipe.x_edges, y_edges=smoke_recipe.y_edges, rng=1
     )
     z_samples = particles.x
     vz_samples = particles.y
-    initial_background, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
-    initial_background = initial_background.T
+    initial_background = estimate_gaussian_smooth_background_vz_mirrored(
+        z_samples, vz_samples, smoke_recipe.x_edges, smoke_recipe.y_edges
+    )
 
     mask = fit.create_sigmoid_mask(1.0, 40.0)(smoke_recipe.x_mesh, smoke_recipe.y_mesh)
 
