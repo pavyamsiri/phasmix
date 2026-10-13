@@ -15,8 +15,10 @@ import numpy as np
 
 from ._backends import FitFailure, FitTerminationReason, OptimizationDiagnostics
 from ._profile_likelihood import ProfileInterval, ProfileLikelihoodResult, ProfilePoint, profile_likelihood
+from .background_estimators import BackgroundEstimator, estimate_gaussian_smooth_background_vz_mirrored
 from .bounds import Interval, ParameterBounds
 from .component import PSpiralComponent
+from .fit import FitInput, FitSuccess
 from .param_layout import ParameterLayout
 
 if TYPE_CHECKING:
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
     from ._backends import BackendResult, PSpiralFitResult
     from .fit import PSpiralFitter
 
-__all__ = [
+__all__: list[str] = [
     "BootstrapReplicate",
     "BootstrapResult",
     "BootstrapSamples",
@@ -35,6 +37,108 @@ __all__ = [
     "bootstrap_uncertainty",
     "profile_likelihood",
 ]
+
+
+def bootstrap_uncertainty_new(
+    fitter: PSpiralFitter,
+    result: FitSuccess,
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
+    *,
+    z_edges: onp.Array1D[np.float64],
+    vz_edges: onp.Array1D[np.float64],
+    seed: int | None = None,
+    background_estimator: BackgroundEstimator | None = None,
+    num_replicates: int = 200,
+) -> tuple[onp.Array2D[np.float64], onp.Array2D[np.float64]]:
+    total_particles = len(z)
+    if len(z) != total_particles or len(vz) != total_particles:
+        msg = "`z` and `vz` must be equal length arrays."
+        raise ValueError(msg)
+    if total_particles < 1:
+        msg = "There are no particles."
+        raise ValueError(msg)
+
+    num_components = result.result.final_model.num_components
+    winding = result.result.final_model.winding
+    warm_start = result.result.final_model.to_array()
+    z_mesh = result.result.final_model.z_mesh
+    vz_mesh = result.result.final_model.vz_mesh
+
+    estimator = background_estimator if background_estimator is not None else estimate_gaussian_smooth_background_vz_mirrored
+
+    rng: np.random.Generator = np.random.default_rng(seed)
+
+    inputs: list[FitInput] = []
+
+    for _ in range(num_replicates):
+        bootstrap_indices = rng.integers(0, total_particles, size=total_particles)
+        new_z = z[bootstrap_indices]
+        new_vz = vz[bootstrap_indices]
+
+        density, _, _ = np.histogram2d(new_z, new_vz, bins=(z_edges, vz_edges))
+        density = density.T
+        background = estimator(
+            new_z,
+            new_vz,
+            z_edges,
+            vz_edges,
+        )
+
+        inputs.append(
+            FitInput(
+                density=density,
+                background=background,
+                z_mesh=z_mesh,
+                vz_mesh=vz_mesh,
+                winding=winding,
+                num_components=num_components,
+                warm_start=warm_start,
+                improve_background=True,
+            )
+        )
+
+    bootstrap_results = fitter.fit_batch(inputs, progress=True)
+    successes = [res for res in bootstrap_results if isinstance(res, FitSuccess)]
+    num_successes = len(successes)
+
+    num_parameters = len(warm_start)
+    all_parameters = np.zeros((num_parameters, num_successes))
+    model_phases = np.zeros((num_components, num_successes))
+
+    for idx, res in enumerate(successes):
+        all_parameters[:, idx] = res.result.final_model.to_array()
+        for component_idx in range(num_components):
+            model_phases[component_idx, idx] = res.result.final_model.components[component_idx].model_phase()
+
+    return (all_parameters, model_phases)
+
+
+def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1) -> tuple[str, str]:
+    """Round a value with an associated error to the errors significant figures.
+
+    Parameters
+    ----------
+    value : float
+        The value to round.
+    error : float
+        The value's error to also round.
+    num_sig_figs : int
+        The number of significant figures to round the error to.
+
+    Returns
+    -------
+    rounded_value : float
+        The rounded value.
+    rounded_error : float
+        The rounded error.
+
+    """
+    if not np.isfinite(value) or not np.isfinite(error) or error <= 0:
+        return f"{value:.6g}", f"{error:.6g}"
+    order = np.floor(np.log10(error))
+    places = max(int(num_sig_figs - order - 1), 0)
+    return (np.format_float_positional(value, precision=places), np.format_float_positional(error, precision=places))
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
+from phasmix.optimizers import DifferentialEvolutionConfig
 from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
@@ -20,6 +21,7 @@ from phasmix import bootstrap_uncertainty, fit, profile_likelihood
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.background_estimators import estimate_gaussian_smooth_background_vz_mirrored
 from phasmix.fit import PSpiralFitter
+from phasmix.uncertainty import bootstrap_uncertainty_new
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -73,6 +75,8 @@ class MockData:
     y_mesh: onp.Array2D[np.float64]
     x_centres: onp.Array1D[np.float64]
     y_centres: onp.Array1D[np.float64]
+    x_samples: onp.Array1D[np.float64]
+    y_samples: onp.Array1D[np.float64]
 
 
 def _generate_mock() -> MockData:
@@ -84,13 +88,6 @@ def _generate_mock() -> MockData:
     density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
     density = density.T
 
-    log.info("Generating initial background estimate via KDE...")
-    background_model = MockModel(signal=[], background=smoke_recipe.model.background)
-    particles = background_model.mock_particles(
-        smoke_recipe.num_samples, x_edges=smoke_recipe.x_edges, y_edges=smoke_recipe.y_edges, rng=1
-    )
-    z_samples = particles.x
-    vz_samples = particles.y
     initial_background = estimate_gaussian_smooth_background_vz_mirrored(
         z_samples, vz_samples, smoke_recipe.x_edges, smoke_recipe.y_edges
     )
@@ -108,6 +105,8 @@ def _generate_mock() -> MockData:
         y_edges=smoke_recipe.y_edges,
         y_centres=smoke_recipe.y_centres,
         y_mesh=smoke_recipe.y_mesh,
+        x_samples=z_samples,
+        y_samples=vz_samples,
     )
 
 
@@ -117,18 +116,27 @@ def _main() -> None:
     initial_background = mock_data.background
     x_mesh = mock_data.x_mesh
     y_mesh = mock_data.y_mesh
+    z_edges = mock_data.x_edges
+    vz_edges = mock_data.y_edges
     mask = mock_data.mask
 
+    num_components: int = 1
     log.info("--- Rust Version ---")
 
     fitter_rust = PSpiralFitter(
         backend="rust",
-        optimizer="differential_evolution",
+        optimizer=DifferentialEvolutionConfig(max_local_iter=300),
         max_iterations=10,
     )
     start_time = time.perf_counter()
     outcome_rust = fitter_rust.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
+        density,
+        initial_background,
+        x_mesh,
+        y_mesh,
+        num_components=num_components,
+        improve_background=True,
+        rng=np.random.default_rng(1),
     )
     elapsed_rust = time.perf_counter() - start_time
     if isinstance(outcome_rust, fit.FitFailure):
@@ -146,11 +154,18 @@ def _main() -> None:
     log.info("--- Python Version ---")
     fitter_py = PSpiralFitter(
         backend="python",
+        optimizer=DifferentialEvolutionConfig(max_local_iter=300),
         max_iterations=10,
     )
     start_time = time.perf_counter()
     outcome_py = fitter_py.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
+        density,
+        initial_background,
+        x_mesh,
+        y_mesh,
+        num_components=num_components,
+        improve_background=True,
+        rng=np.random.default_rng(1),
     )
     elapsed_py = time.perf_counter() - start_time
     if isinstance(outcome_py, fit.FitFailure):
