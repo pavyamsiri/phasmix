@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from argparse import ArgumentParser
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from scipy import ndimage, stats
 
-from phasmix import fit
+from phasmix import bootstrap_uncertainty, fit
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.component import PSpiralComponent
 from phasmix.fit import FitInput, FitSuccess, GaussianSmoothConfig, PSpiralFitter
@@ -155,8 +156,11 @@ def _generate_mock(alpha: float) -> MockData:
     )
 
 
-def main() -> None:
+def main(*, num_replicates: int = 5) -> None:
     """Generate mocks, fit them, and plot parameter recovery."""
+    if num_replicates < 2:
+        msg = "At least two bootstrap replicates are needed to estimate error bars."
+        raise ValueError(msg)
     x_edges = np.linspace(-1.2, 1.2, 100 + 1)
     y_edges = np.linspace(-60.0, 60.0, 100 + 1)
     dz: float = np.mean(np.diff(x_edges))
@@ -175,11 +179,16 @@ def main() -> None:
     measured_alphas = np.zeros_like(actual_alphas)
     measured_thetas = np.zeros_like(actual_thetas)
     measured_scales = np.zeros_like(actual_scales)
+    alpha_errors = np.full_like(actual_alphas, np.nan)
+    angle_errors = np.full_like(actual_thetas, np.nan)
+    scale_errors = np.full_like(actual_scales, np.nan)
+    particles = []
     requests: list[FitInput] = []
     for idx, alpha in enumerate(actual_alphas):
         data = _generate_mock(alpha)
         actual_thetas[idx] = data.phase
         actual_scales[idx] = data.scale_factor
+        particles.append((data.z, data.vz))
         requests.append(
             FitInput(
                 density=data.density,
@@ -199,6 +208,26 @@ def main() -> None:
         measured_alphas[idx] = result.result.final_model.components[0].alpha
         measured_thetas[idx] = result.result.final_model.components[0].model_phase()
         measured_scales[idx] = result.result.final_model.components[0].scale_factor
+        log.info("Bootstrapping mock %d/%d with %d replicates", idx + 1, len(results), num_replicates)
+        z, vz = particles[idx]
+        samples = bootstrap_uncertainty(
+            fitter,
+            result,
+            z,
+            vz,
+            z_edges=x_edges,
+            vz_edges=y_edges,
+            num_replicates=num_replicates,
+            seed=idx,
+        )
+        if samples.parameters.shape[-1] < 2:
+            log.warning("Mock %d has fewer than two successful bootstrap fits; omitting its error bars", idx + 1)
+            continue
+        alpha_errors[idx] = samples.errors()[0, 0]
+        scale_errors[idx] = samples.errors()[4, 0]
+        phase_offsets = (samples.model_phases[0] - measured_thetas[idx] + np.pi) % (2 * np.pi) - np.pi
+        lower, upper = np.percentile(phase_offsets, [16, 84])
+        angle_errors[idx] = np.rad2deg((upper - lower) / 2)
 
     corr_fit = stats.linregress(actual_alphas, measured_alphas)
     slope, slope_error = round_value_with_error(corr_fit.slope, corr_fit.stderr)
@@ -244,6 +273,22 @@ def main() -> None:
     )
     fig.colorbar(scale_points, ax=scale_axes, label=r"True $\alpha$")
 
+    for axes, actual, measured, errors, points in (
+        (alpha_axes, actual_alphas, measured_alphas, alpha_errors, alpha_points),
+        (theta_axes, actual_angles, measured_angles, angle_errors, theta_points),
+        (scale_axes, actual_scales, measured_scales, scale_errors, scale_points),
+    ):
+        axes.errorbar(
+            actual,
+            measured,
+            yerr=errors,
+            fmt="none",
+            ecolor=points.cmap(points.norm(points.get_array())),
+            elinewidth=0.8,
+            alpha=0.6,
+            zorder=1,
+        )
+
     plt.savefig("sys_error.png")
     plt.show()
     plt.close(fig)
@@ -277,5 +322,10 @@ def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1)
 
 
 if __name__ == "__main__":
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--num-replicates", type=int, default=5, help="Bootstrap replicates per mock (default: 5, for plot formatting)."
+    )
+    args = parser.parse_args()
     _ = setup_logging()
-    main()
+    main(num_replicates=args.num_replicates)
