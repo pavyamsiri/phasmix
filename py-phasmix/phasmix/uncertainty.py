@@ -6,7 +6,6 @@ Use the original fitter configuration; fitted results do not retain its provenan
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -33,20 +32,67 @@ __all__: list[str] = [
 
 
 class BootstrapSamples:
+    """Bootstrap samples of model parameters.
+
+    Attributes
+    ----------
+    parameters : Array3D[f64]
+        The samples of the model parameters with shape (num_parameters=6, num_components, num_samples).
+    model_phases : Array2D[f64]
+        The samples of the model phases with shape (num_components, num_samples).
+
+    """
+
     def __init__(self, *, parameters: onp.Array3D[np.float64], model_phases: onp.Array2D[np.float64]) -> None:
+        """Initialize bootstrap samples of parameters.
+
+        Parameters
+        ----------
+        parameters : Array3D[f64]
+            The samples of the model parameters with shape (num_parameters, num_components, num_samples).
+        model_phases : Array2D[f64]
+            The samples of the model phases with shape (num_components, num_samples).
+
+        """
+        num_parameters: int = 6
+        num_components: int = parameters.shape[1]
+        num_samples: int = parameters.shape[2]
+        expected_parameter_shape = (num_parameters, num_components, num_samples)
+        if parameters.shape != expected_parameter_shape:
+            msg = f"The expected shape of `parameters` is {expected_parameter_shape}"
+            raise ValueError(msg)
+
+        expected_model_shape = (num_components, num_samples)
+        if model_phases.shape != expected_model_shape:
+            msg = f"The expected shape of `model_phases` is {expected_model_shape}"
+            raise ValueError(msg)
+
         self.parameters: Final[onp.Array3D[np.float64]] = parameters
         self.model_phases: Final[onp.Array2D[np.float64]] = model_phases
+
+        # Cached parameter percentiles
         self._medians: onp.Array2D[np.float64] | None = None
         self._lower: onp.Array2D[np.float64] | None = None
         self._upper: onp.Array2D[np.float64] | None = None
         self._errors: onp.Array2D[np.float64] | None = None
 
+        # Cached model phase percentiles
         self._phase_medians: onp.Array2D[np.float64] | None = None
         self._phase_lower: onp.Array2D[np.float64] | None = None
         self._phase_upper: onp.Array2D[np.float64] | None = None
         self._phase_errors: onp.Array2D[np.float64] | None = None
 
     def errors(self) -> onp.Array2D[np.float64]:
+        """Return the estimated standard deviation of the parameters.
+
+        More specifically, it is the half-width of the central 68th quantile.
+
+        Returns
+        -------
+        errors : Array2D[f64]
+            The errors on the parameters in the shape (num_parameters, num_components).
+
+        """
         if self._errors is None:
             lb = self.lower()
             ub = self.upper()
@@ -55,21 +101,55 @@ class BootstrapSamples:
         return self._errors
 
     def medians(self) -> onp.Array2D[np.float64]:
+        """Return the median of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        medians : Array2D[f64]
+            The medians on the parameters in the shape (num_parameters, num_components).
+
+        """
         if self._medians is None:
             self._medians = np.median(self.parameters, axis=2)
         return self._medians
 
     def lower(self) -> onp.Array2D[np.float64]:
+        """Return the 16th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array2D[f64]
+            The 16th percentile of the bootstrap sampled parameters in the shape (num_parameters, num_components).
+
+        """
         if self._lower is None:
             self._lower = np.percentile(self.parameters, 16, axis=2)
         return self._lower
 
     def upper(self) -> onp.Array2D[np.float64]:
+        """Return the 84th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p84 : Array2D[f64]
+            The 84th percentile of the bootstrap sampled parameters in the shape (num_parameters, num_components).
+
+        """
         if self._upper is None:
             self._upper = np.percentile(self.parameters, 84, axis=2)
         return self._upper
 
     def phase_errors(self) -> onp.Array2D[np.float64]:
+        """Return the estimated standard deviation of the model phases.
+
+        More specifically, it is the half-width of the central 68th quantile.
+
+        Returns
+        -------
+        errors : Array1D[f64]
+            The errors on the model phases in the shape (num_components,).
+
+        """
         if self._phase_errors is None:
             lb = self.phase_lower()
             ub = self.phase_upper()
@@ -78,21 +158,47 @@ class BootstrapSamples:
         return self._phase_errors
 
     def phase_medians(self) -> onp.Array2D[np.float64]:
+        """Return the median of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        medians : Array1D[f64]
+            The medians of the model phases in the shape (num_components,).
+
+        """
         if self._phase_medians is None:
             self._phase_medians = np.median(self.model_phases, axis=1)
         return self._phase_medians
 
     def phase_lower(self) -> onp.Array2D[np.float64]:
+        """Return the 16th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array1D[f64]
+            The 16th percentile of the bootstrap sampled model phases in the shape (num_components,).
+
+        """
         if self._phase_lower is None:
             self._phase_lower = np.percentile(self.model_phases, 16, axis=1)
         return self._phase_lower
 
     def phase_upper(self) -> onp.Array2D[np.float64]:
+        """Return the 84th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array1D[f64]
+            The 84th percentile of the bootstrap sampled model phases in the shape (num_components,).
+
+        """
         if self._phase_upper is None:
             self._phase_upper = np.percentile(self.model_phases, 84, axis=1)
         return self._phase_upper
 
 
+# TODO(pavyamsiri): How do we couple the fitter and the result together so we don't need
+# the user to make sure this is true?
 def bootstrap_uncertainty(
     fitter: PSpiralFitter,
     result: FitSuccess,
@@ -105,6 +211,35 @@ def bootstrap_uncertainty(
     background_estimator: BackgroundEstimator | None = None,
     num_replicates: int = 200,
 ) -> BootstrapSamples:
+    """Perform bootstrap sampling to return model parameter samples.
+
+    Parameters
+    ----------
+    fitter : PSpiralFitter
+        The fitter used and to be used.
+    result : FitSuccess
+        An already successful fit that was produced by the given fitter.
+    z : Array1D[f64]
+        The z coordinates of the data that was the input to `result`.
+    vz : Array1D[f64]
+        The Vz velocities of the data that was the input to `result`.
+    z_edges : Array1D[f64]
+        The z bin edges used to produce `result`.
+    vz_edges : Array1D[f64]
+        The Vz bin edges used to produce `result`.
+    seed : int | None
+        The RNG seed to use or set to `None` to use a non-fixed seed.
+    background_estimator : BackgroundEstimator | None
+        The background estimator to use if given otherwise the default is Scott's rule Gaussian smoothing.
+    num_replicates : int
+        The number of replicates/samples.
+
+    Returns
+    -------
+    samples : BootstrapSamples
+        The bootstrap samples.
+
+    """
     total_particles = len(z)
     if len(z) != total_particles or len(vz) != total_particles:
         msg = "`z` and `vz` must be equal length arrays."
@@ -148,6 +283,7 @@ def bootstrap_uncertainty(
                 winding=winding,
                 num_components=num_components,
                 warm_start=warm_start,
+                # TODO(pavyamsiri): Get this from the result.
                 improve_background=True,
             )
         )
