@@ -14,7 +14,7 @@ from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
 
-from phasmix import fit
+from phasmix import BootstrapSamples, fit
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.background_estimators import estimate_gaussian_smooth_background_vz_mirrored
 from phasmix.fit import FitSuccess, PSpiralFitter
