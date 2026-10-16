@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing as mp
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,24 +10,22 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from matplotlib import pyplot as plt
-from phasmix.optimizers import DifferentialEvolutionConfig
-from phasmock.mock import MockModel
 from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
 
-from phasmix import bootstrap_uncertainty, fit, profile_likelihood
+from phasmix import BootstrapSamples, fit
 from phasmix._likelihood_utils import ln_likelihood
-from phasmix.fit import PSpiralFitter
+from phasmix.background_estimators import estimate_gaussian_smooth_background_vz_mirrored
+from phasmix.fit import FitSuccess, PSpiralFitter
+from phasmix.optimizers import DifferentialEvolutionConfig
+from phasmix.uncertainty import bootstrap_uncertainty
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Final
 
     from optype import numpy as onp
-
-    from phasmix import BootstrapResult, ProfileLikelihoodResult
-    from phasmix.fit import PSpiralFitResult
 
 
 FORMAT: Final[str] = "%(message)s"
@@ -73,6 +70,8 @@ class MockData:
     y_mesh: onp.Array2D[np.float64]
     x_centres: onp.Array1D[np.float64]
     y_centres: onp.Array1D[np.float64]
+    x_samples: onp.Array1D[np.float64]
+    y_samples: onp.Array1D[np.float64]
 
 
 def _generate_mock() -> MockData:
@@ -84,15 +83,9 @@ def _generate_mock() -> MockData:
     density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
     density = density.T
 
-    log.info("Generating initial background estimate via KDE...")
-    background_model = MockModel(signal=[], background=smoke_recipe.model.background)
-    particles = background_model.mock_particles(
-        smoke_recipe.num_samples, x_edges=smoke_recipe.x_edges, y_edges=smoke_recipe.y_edges, rng=None
+    initial_background = estimate_gaussian_smooth_background_vz_mirrored(
+        z_samples, vz_samples, smoke_recipe.x_edges, smoke_recipe.y_edges
     )
-    z_samples = particles.x
-    vz_samples = particles.y
-    initial_background, _, _ = np.histogram2d(z_samples, vz_samples, bins=(smoke_recipe.x_edges, smoke_recipe.y_edges))
-    initial_background = initial_background.T
 
     mask = fit.create_sigmoid_mask(1.0, 40.0)(smoke_recipe.x_mesh, smoke_recipe.y_mesh)
 
@@ -107,6 +100,8 @@ def _generate_mock() -> MockData:
         y_edges=smoke_recipe.y_edges,
         y_centres=smoke_recipe.y_centres,
         y_mesh=smoke_recipe.y_mesh,
+        x_samples=z_samples,
+        y_samples=vz_samples,
     )
 
 
@@ -116,18 +111,29 @@ def _main() -> None:
     initial_background = mock_data.background
     x_mesh = mock_data.x_mesh
     y_mesh = mock_data.y_mesh
+    z_edges = mock_data.x_edges
+    vz_edges = mock_data.y_edges
     mask = mock_data.mask
+    z = mock_data.x_samples
+    vz = mock_data.y_samples
 
+    num_components: int = 1
     log.info("--- Rust Version ---")
 
     fitter_rust = PSpiralFitter(
         backend="rust",
-        optimizer="differential_evolution",
+        optimizer=DifferentialEvolutionConfig(max_local_iter=300),
         max_iterations=10,
     )
     start_time = time.perf_counter()
     outcome_rust = fitter_rust.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
+        density,
+        initial_background,
+        x_mesh,
+        y_mesh,
+        num_components=num_components,
+        improve_background=True,
+        rng=np.random.default_rng(1),
     )
     elapsed_rust = time.perf_counter() - start_time
     if isinstance(outcome_rust, fit.FitFailure):
@@ -145,11 +151,18 @@ def _main() -> None:
     log.info("--- Python Version ---")
     fitter_py = PSpiralFitter(
         backend="python",
+        optimizer=DifferentialEvolutionConfig(max_local_iter=300),
         max_iterations=10,
     )
     start_time = time.perf_counter()
     outcome_py = fitter_py.fit_spiral_with_background(
-        density, initial_background, x_mesh, y_mesh, num_components=None, improve_background=True, rng=np.random.default_rng(1)
+        density,
+        initial_background,
+        x_mesh,
+        y_mesh,
+        num_components=num_components,
+        improve_background=True,
+        rng=np.random.default_rng(1),
     )
     elapsed_py = time.perf_counter() - start_time
     if isinstance(outcome_py, fit.FitFailure):
@@ -164,7 +177,7 @@ def _main() -> None:
     log.info("Python final lnl: %.2f", res_py.lnl)
     log.info("Python pvalue: %f", res_py.final_model.pvalue(density, mask))
 
-    _compare_uncertainty(fitter_py, fitter_rust, res_py)
+    _compare_uncertainty(fitter_py, fitter_rust, outcome_rust, z, vz, z_edges=z_edges, vz_edges=vz_edges)
 
     rs_background = res_rust.final_model.background.reshape(x_mesh.shape)
     rs_density = res_rust.final_model.prediction()
@@ -199,140 +212,84 @@ def _main() -> None:
     plt.close(fig)
 
 
-def _compare_uncertainty(fitter_py: PSpiralFitter, fitter_rust: PSpiralFitter, res_py: PSpiralFitResult) -> None:
+def _compare_uncertainty(
+    fitter_py: PSpiralFitter,
+    fitter_rust: PSpiralFitter,
+    res: FitSuccess,
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
+    z_edges: onp.Array1D[np.float64],
+    vz_edges: onp.Array1D[np.float64],
+) -> None:
     """Benchmark both uncertainty methods on the same reference fit."""
     log.info("--- Bootstrap comparison: same Python reference, seed, counts, and bounds ---")
     parameter_names = ("alpha", "b", "c", "theta0", "scale_factor", "rho")
-    worker_counts = tuple(dict.fromkeys((1, 4, mp.cpu_count())))
+    num_components = res.result.final_model.num_components
     for name, bootstrap_fitter in (("Python", fitter_py), ("Rust", fitter_rust)):
-        for worker_idx, workers in enumerate(worker_counts):
-            start_time = time.perf_counter()
-            uncertainty = bootstrap_uncertainty(bootstrap_fitter, res_py, n_resamples=200, seed=2, workers=workers)
-            elapsed_bootstrap = time.perf_counter() - start_time
-            evaluations = sum(item.diagnostics.nfev or 0 for item in uncertainty.replicates)
-            iterations = sum(item.diagnostics.nit or 0 for item in uncertainty.replicates)
-            log.info(
-                "%s bootstrap: %.3fs, workers=%d, successful=%d/%d, nfev=%d, nit=%d",
-                name,
-                elapsed_bootstrap,
-                workers,
-                uncertainty.n_successful,
-                len(uncertainty.replicates),
-                evaluations,
-                iterations,
-            )
-            if worker_idx == (len(worker_counts) - 1):
-                for index, (_, error, interval) in enumerate(
-                    zip(uncertainty.median, uncertainty.standard_errors, uncertainty.intervals, strict=True)
-                ):
-                    component, parameter = divmod(index, len(parameter_names))
-                    if parameter_names[parameter] != "theta0":
-                        (median_param, error_bar) = round_value_with_error(interval[1], 1.96 * error)
-                        (lower_param, _) = round_value_with_error(interval[0], 1.96 * error)
-                        (upper_param, _) = round_value_with_error(interval[2], 1.96 * error)
-                        log.info(
-                            "%s component %d %s: %s +/- %s [%s, %s]",
-                            name,
-                            component + 1,
-                            parameter_names[parameter],
-                            median_param,
-                            error_bar,
-                            lower_param,
-                            upper_param,
-                        )
-                    else:
-                        median_phase, error_bar = round_value_with_error(np.rad2deg(interval[1]), 1.96 * np.rad2deg(error))
-                        lower_phase, _ = round_value_with_error(np.rad2deg(interval[0]), 1.96 * np.rad2deg(error))
-                        upper_phase, _ = round_value_with_error(np.rad2deg(interval[2]), 1.96 * np.rad2deg(error))
-                        log.info(
-                            "%s component %d %s: %s +/- %s [%s, %s] deg",
-                            name,
-                            component,
-                            parameter_names[parameter],
-                            median_phase,
-                            error_bar,
-                            lower_phase,
-                            upper_phase,
-                        )
-                for component, (error, interval) in enumerate(
-                    zip(uncertainty.model_phase_standard_errors, uncertainty.model_phase_intervals, strict=True), start=1
-                ):
-                    median_phase, error_bar = round_value_with_error(np.rad2deg(interval[1]), 1.96 * np.rad2deg(error))
-                    lower_phase, _ = round_value_with_error(np.rad2deg(interval[0]), 1.96 * np.rad2deg(error))
-                    upper_phase, _ = round_value_with_error(np.rad2deg(interval[2]), 1.96 * np.rad2deg(error))
-                    log.info(
-                        "%s component %d model_phase(r=%g): %s +/- %s [%s, %s] deg",
-                        name,
-                        component,
-                        uncertainty.model_phase_radius,
-                        median_phase,
-                        error_bar,
-                        lower_phase,
-                        upper_phase,
-                    )
-                for warning in uncertainty.warnings:
-                    log.info("%s bootstrap note: %s", name, warning)
-
-            try:
-                profile = profile_likelihood(
-                    bootstrap_fitter,
-                    res_py,
-                    workers=workers,
-                    confidence_level=uncertainty.confidence_level,
-                    model_phase_radius=uncertainty.model_phase_radius,
-                )
-            except RuntimeError as exc:
-                log.warning("%s profile likelihood failed: %s", name, exc)
-                continue
-            log.info(
-                "%s profile likelihood: %.3fs, workers=%d, nfev=%d; bootstrap/profile runtime ratio=%.3g",
-                name,
-                profile.elapsed_seconds,
-                workers,
-                profile.nfev,
-                elapsed_bootstrap / profile.elapsed_seconds,
-            )
-            if worker_idx == len(worker_counts) - 1:
-                _report_uncertainty_comparison(name, uncertainty, profile)
-                for warning in profile.warnings:
-                    log.info("%s profile note: %s", name, warning)
-
-
-def _report_uncertainty_comparison(name: str, bootstrap: BootstrapResult, profile: ProfileLikelihoodResult) -> None:
-    """Compare percentile and profile intervals at the same confidence level."""
-    bootstrap_intervals = np.vstack((bootstrap.intervals, bootstrap.model_phase_intervals))
-    profile_intervals = np.vstack((profile.intervals, profile.model_phase_intervals))
-    log.info("%s uncertainty comparison: %.1f%% intervals, fixed background", name, 100 * profile.confidence_level)
-    for item, bootstrap_interval, profile_interval in zip(profile.profiles, bootstrap_intervals, profile_intervals, strict=True):
-        angular = item.parameter in ("theta0", "model_phase")
-        boot = np.rad2deg(bootstrap_interval) if angular else bootstrap_interval
-        prof = np.rad2deg(profile_interval) if angular else profile_interval
-        unit = " deg" if angular else ""
-        boot_width = float(boot[2] - boot[0])
-        profile_width = float(prof[2] - prof[0])
-        ratio = profile_width / boot_width if boot_width > 0 else float("nan")
-        log.info(
-            "%s component %d %s: bootstrap %.6g -%.6g/+%.6g [%.6g, %.6g]%s; "
-            "profile %.6g -%.6g/+%.6g [%.6g, %.6g]%s (%s/%s); profile/bootstrap width=%.3g",
-            name,
-            item.component + 1,
-            item.parameter,
-            boot[1],
-            boot[1] - boot[0],
-            boot[2] - boot[1],
-            boot[0],
-            boot[2],
-            unit,
-            prof[1],
-            prof[1] - prof[0],
-            prof[2] - prof[1],
-            prof[0],
-            prof[2],
-            unit,
-            item.lower_status,
-            item.upper_status,
-            ratio,
+        start_time = time.perf_counter()
+        uncertainty = bootstrap_uncertainty(
+            bootstrap_fitter,
+            res,
+            z,
+            vz,
+            z_edges=z_edges,
+            vz_edges=vz_edges,
+            num_replicates=20 if name == "Python" else 200,
+            seed=2,
         )
+        elapsed_bootstrap = time.perf_counter() - start_time
+        log.info("%s bootstrap: %.3fs", name, elapsed_bootstrap)
+        medians = uncertainty.medians()
+        errors = uncertainty.errors()
+        lower = uncertainty.lower()
+        upper = uncertainty.upper()
+
+        for component_idx in range(num_components):
+            for parameter_idx, param_name in enumerate(parameter_names):
+                if param_name != "theta0":
+                    current_median = medians[parameter_idx, component_idx]
+                    current_lower = lower[parameter_idx, component_idx]
+                    current_upper = upper[parameter_idx, component_idx]
+                    current_error = errors[parameter_idx, component_idx]
+                else:
+                    current_median = np.rad2deg(medians[parameter_idx, component_idx]) % 360
+                    current_lower = np.rad2deg(lower[parameter_idx, component_idx]) % 360
+                    current_upper = np.rad2deg(upper[parameter_idx, component_idx]) % 360
+                    current_error = np.rad2deg(errors[parameter_idx, component_idx]) % 360
+
+                (median_param, error_bar) = round_value_with_error(current_median, current_error)
+                (lower_param, _) = round_value_with_error(current_lower, current_error)
+                (upper_param, _) = round_value_with_error(current_upper, current_error)
+                relative_error = 100 * current_error / current_median if current_median > 0 else np.inf
+                log.info(
+                    "%s component %d %s: %s +/- %s (%f%%) [%s, %s]",
+                    name,
+                    component_idx + 1,
+                    param_name,
+                    median_param,
+                    error_bar,
+                    relative_error,
+                    lower_param,
+                    upper_param,
+                )
+            current_median = np.rad2deg(uncertainty.phase_medians()[component_idx]) % 360
+            current_lower = np.rad2deg(uncertainty.phase_lower()[component_idx]) % 360
+            current_upper = np.rad2deg(uncertainty.phase_upper()[component_idx]) % 360
+            current_error = np.rad2deg(uncertainty.phase_errors()[component_idx]) % 360
+            relative_error = 100 * current_error / current_median if current_median > 0 else np.inf
+            (median_param, error_bar) = round_value_with_error(current_median, current_error)
+            (lower_param, _) = round_value_with_error(current_lower, current_error)
+            (upper_param, _) = round_value_with_error(current_upper, current_error)
+            log.info(
+                "%s component %d model phase(r=500): %s +/- %s (%f%%) [%s, %s]",
+                name,
+                component_idx + 1,
+                median_param,
+                error_bar,
+                relative_error,
+                lower_param,
+                upper_param,
+            )
 
 
 def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1) -> tuple[str, str]:

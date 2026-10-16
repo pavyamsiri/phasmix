@@ -6,28 +6,22 @@ Use the original fitter configuration; fitted results do not retain its provenan
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from copy import copy
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ._backends import FitFailure, FitTerminationReason, OptimizationDiagnostics
 from ._profile_likelihood import ProfileInterval, ProfileLikelihoodResult, ProfilePoint, profile_likelihood
-from .bounds import Interval, ParameterBounds
-from .component import PSpiralComponent
-from .param_layout import ParameterLayout
+from .background_estimators import BackgroundEstimator, estimate_gaussian_smooth_background_vz_mirrored
+from .fit import FitInput, FitSuccess
 
 if TYPE_CHECKING:
+    from typing import Final
+
     from optype import numpy as onp
 
-    from ._backends import BackendResult, PSpiralFitResult
     from .fit import PSpiralFitter
 
-__all__ = [
-    "BootstrapReplicate",
-    "BootstrapResult",
+__all__: list[str] = [
     "BootstrapSamples",
     "ProfileInterval",
     "ProfileLikelihoodResult",
@@ -37,369 +31,302 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, kw_only=True)
 class BootstrapSamples:
-    """Original paired samples and bin edges, retained by reference.
+    """Bootstrap samples of model parameters.
 
-    ``improve_background`` must match the original fit. Arrays must not change
-    during execution. Include out-of-grid stars if they contributed to its KDE.
+    Attributes
+    ----------
+    parameters : Array3D[f64]
+        The samples of the model parameters with shape (num_parameters=6, num_components, num_samples).
+    model_phases : Array2D[f64]
+        The samples of the model phases with shape (num_components, num_samples).
+
     """
 
-    z: onp.Array1D[np.float64]
-    vz: onp.Array1D[np.float64]
-    z_bins: onp.Array1D[np.float64]
-    vz_bins: onp.Array1D[np.float64]
-    improve_background: bool = True
+    def __init__(self, *, parameters: onp.Array3D[np.float64], model_phases: onp.Array2D[np.float64]) -> None:
+        """Initialize bootstrap samples of parameters.
 
+        Parameters
+        ----------
+        parameters : Array3D[f64]
+            The samples of the model parameters with shape (num_parameters, num_components, num_samples).
+        model_phases : Array2D[f64]
+            The samples of the model phases with shape (num_components, num_samples).
 
-@dataclass(frozen=True)
-class BootstrapReplicate:
-    """One requested draw, including failed draws and optimizer diagnostics."""
-
-    index: int
-    parameters: onp.Array1D[np.float64] | None
-    diagnostics: OptimizationDiagnostics
-    reason: str
-    count_total: int
-
-
-@dataclass(frozen=True)
-class BootstrapResult:
-    """Conditional bootstrap summary in flattened component-major parameter order.
-
-    ``parameters`` has one row per requested replicate; failures are NaN rows.
-    Angles are unwrapped around ``reference`` and exchangeable components aligned.
-    ``intervals`` columns are lower, median, upper. ``model_phases`` contains
-    phi_s(r) + theta0 for each replicate and component, using aligned theta0
-    without wrapping the derived phase. Its errors and intervals use the same
-    accepted draws at ``model_phase_radius``.
-    Covariance uses accepted replicates and ddof=1. Intervals are percentile
-    intervals, not calibrated guarantees. Summaries are NaN with fewer than two
-    accepted draws. Inspect ``warnings`` and ``replicates`` before using them.
-    """
-
-    reference: onp.Array1D[np.float64]
-    parameters: onp.Array2D[np.float64]
-    covariance: onp.Array2D[np.float64]
-    standard_errors: onp.Array1D[np.float64]
-    intervals: onp.Array2D[np.float64]
-    bias: onp.Array1D[np.float64]
-    model_phases: onp.Array2D[np.float64]
-    model_phase_standard_errors: onp.Array1D[np.float64]
-    model_phase_intervals: onp.Array2D[np.float64]
-    model_phase_radius: float
-    replicates: tuple[BootstrapReplicate, ...]
-    method: Literal["samples", "parametric_counts"]
-    confidence_level: float
-    seed: int
-    maxiter: int
-    warnings: tuple[str, ...]
-
-    @property
-    def median(self) -> onp.Array1D[np.float64]:
-        """Bootstrap parameter medians (the middle column of ``intervals``)."""
-        return self.intervals[:, 1]
-
-    @property
-    def n_successful(self) -> int:
-        """Number of accepted local refits."""
-        return sum(item.parameters is not None for item in self.replicates)
-
-
-def _validate_samples(samples: BootstrapSamples, result: PSpiralFitResult) -> None:
-    if (
-        samples.z.ndim != 1
-        or samples.vz.shape != samples.z.shape
-        or samples.z.size < 2
-        or not np.all(np.isfinite(samples.z))
-        or not np.all(np.isfinite(samples.vz))
-    ):
-        msg = "Samples must be finite paired 1D arrays with at least two observations."
-        raise ValueError(msg)
-    for edges in (samples.z_bins, samples.vz_bins):
-        if edges.ndim != 1 or edges.size < 2 or not np.all(np.isfinite(edges)) or np.any(np.diff(edges) <= 0):
-            msg = "Bin edges must be finite and strictly increasing."
+        """
+        num_parameters: int = 6
+        num_components: int = parameters.shape[1]
+        num_samples: int = parameters.shape[2]
+        expected_parameter_shape = (num_parameters, num_components, num_samples)
+        if parameters.shape != expected_parameter_shape:
+            msg = f"The expected shape of `parameters` is {expected_parameter_shape}"
             raise ValueError(msg)
-    counts, _, _ = np.histogram2d(samples.z, samples.vz, bins=(samples.z_bins, samples.vz_bins))
-    z_grid, vz_grid = np.meshgrid(
-        (samples.z_bins[:-1] + samples.z_bins[1:]) / 2,
-        (samples.vz_bins[:-1] + samples.vz_bins[1:]) / 2,
-    )
-    model = result.final_model
-    if not (
-        np.array_equal(counts.T, result.data) and np.array_equal(z_grid, model.z_mesh) and np.array_equal(vz_grid, model.vz_mesh)
-    ):
-        msg = "Samples and bins must reproduce the original fit's count map and grid."
-        raise ValueError(msg)
+
+        expected_model_shape = (num_components, num_samples)
+        if model_phases.shape != expected_model_shape:
+            msg = f"The expected shape of `model_phases` is {expected_model_shape}"
+            raise ValueError(msg)
+
+        self.parameters: Final[onp.Array3D[np.float64]] = parameters
+        self.model_phases: Final[onp.Array2D[np.float64]] = model_phases
+
+        # Cached parameter percentiles
+        self._medians: onp.Array2D[np.float64] | None = None
+        self._lower: onp.Array2D[np.float64] | None = None
+        self._upper: onp.Array2D[np.float64] | None = None
+        self._errors: onp.Array2D[np.float64] | None = None
+
+        # Cached model phase percentiles
+        self._phase_medians: onp.Array2D[np.float64] | None = None
+        self._phase_lower: onp.Array2D[np.float64] | None = None
+        self._phase_upper: onp.Array2D[np.float64] | None = None
+        self._phase_errors: onp.Array2D[np.float64] | None = None
+
+    def errors(self) -> onp.Array2D[np.float64]:
+        """Return the estimated standard deviation of the parameters.
+
+        More specifically, it is the half-width of the central 68th quantile.
+
+        Returns
+        -------
+        errors : Array2D[f64]
+            The errors on the parameters in the shape (num_parameters, num_components).
+
+        """
+        if self._errors is None:
+            lb = self.lower()
+            ub = self.upper()
+            self._errors = (ub - lb) / 2.0
+
+        return self._errors
+
+    def medians(self) -> onp.Array2D[np.float64]:
+        """Return the median of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        medians : Array2D[f64]
+            The medians on the parameters in the shape (num_parameters, num_components).
+
+        """
+        if self._medians is None:
+            self._medians = np.median(self.parameters, axis=2)
+        return self._medians
+
+    def lower(self) -> onp.Array2D[np.float64]:
+        """Return the 16th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array2D[f64]
+            The 16th percentile of the bootstrap sampled parameters in the shape (num_parameters, num_components).
+
+        """
+        if self._lower is None:
+            self._lower = np.percentile(self.parameters, 16, axis=2)
+        return self._lower
+
+    def upper(self) -> onp.Array2D[np.float64]:
+        """Return the 84th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p84 : Array2D[f64]
+            The 84th percentile of the bootstrap sampled parameters in the shape (num_parameters, num_components).
+
+        """
+        if self._upper is None:
+            self._upper = np.percentile(self.parameters, 84, axis=2)
+        return self._upper
+
+    def phase_errors(self) -> onp.Array2D[np.float64]:
+        """Return the estimated standard deviation of the model phases.
+
+        More specifically, it is the half-width of the central 68th quantile.
+
+        Returns
+        -------
+        errors : Array1D[f64]
+            The errors on the model phases in the shape (num_components,).
+
+        """
+        if self._phase_errors is None:
+            lb = self.phase_lower()
+            ub = self.phase_upper()
+            self._phase_errors = (ub - lb) / 2.0
+
+        return self._phase_errors
+
+    def phase_medians(self) -> onp.Array2D[np.float64]:
+        """Return the median of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        medians : Array1D[f64]
+            The medians of the model phases in the shape (num_components,).
+
+        """
+        if self._phase_medians is None:
+            self._phase_medians = np.median(self.model_phases, axis=1)
+        return self._phase_medians
+
+    def phase_lower(self) -> onp.Array2D[np.float64]:
+        """Return the 16th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array1D[f64]
+            The 16th percentile of the bootstrap sampled model phases in the shape (num_components,).
+
+        """
+        if self._phase_lower is None:
+            self._phase_lower = np.percentile(self.model_phases, 16, axis=1)
+        return self._phase_lower
+
+    def phase_upper(self) -> onp.Array2D[np.float64]:
+        """Return the 84th percentile of the bootstrap sampled parameters.
+
+        Returns
+        -------
+        p16 : Array1D[f64]
+            The 84th percentile of the bootstrap sampled model phases in the shape (num_components,).
+
+        """
+        if self._phase_upper is None:
+            self._phase_upper = np.percentile(self.model_phases, 84, axis=1)
+        return self._phase_upper
 
 
-def _local_bounds(bounds: ParameterBounds, phase: float) -> ParameterBounds:
-    """Center full-period angular intervals on the reference for local search."""
-    theta = bounds.theta0
-    if isinstance(theta, Interval) and theta.upper - theta.lower >= 2 * np.pi - 1e-12:
-        theta = Interval(phase - np.pi, phase + np.pi)
-    return ParameterBounds(
-        alpha=bounds.alpha,
-        b=bounds.b,
-        c=bounds.c,
-        theta0=theta,
-        scale_factor=bounds.scale_factor,
-        rho=bounds.rho,
-    )
-
-
-def _aligned(
-    values: onp.Array1D[np.float64],
-    reference: onp.Array1D[np.float64],
-    scale: onp.Array1D[np.float64],
-    *,
-    exchangeable: bool,
-) -> onp.Array1D[np.float64]:
-    def unwrap(candidate: onp.Array1D[np.float64]) -> onp.Array1D[np.float64]:
-        candidate = candidate.copy()
-        candidate[3::6] = reference[3::6] + (candidate[3::6] - reference[3::6] + np.pi) % (2 * np.pi) - np.pi
-        return candidate
-
-    direct = unwrap(values)
-    if exchangeable:
-        swapped = unwrap(values.reshape(2, 6)[::-1].flatten())
-        if np.sum(np.square((swapped - reference) / scale)) < np.sum(np.square((direct - reference) / scale)):
-            return swapped
-    return direct
-
-
+# TODO(pavyamsiri): How do we couple the fitter and the result together so we don't need
+# the user to make sure this is true?
 def bootstrap_uncertainty(
     fitter: PSpiralFitter,
-    result: PSpiralFitResult,
+    result: FitSuccess,
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
     *,
-    samples: BootstrapSamples | None = None,
-    n_resamples: int = 200,
-    confidence_level: float = 0.95,
-    seed: int = 0,
-    workers: int = 1,
-    maxiter: int | None = None,
-    model_phase_radius: float = 0.5,
-) -> BootstrapResult:
-    """Bootstrap an existing fit using its original fitter configuration.
+    z_edges: onp.Array1D[np.float64],
+    vz_edges: onp.Array1D[np.float64],
+    seed: int | None = None,
+    background_estimator: BackgroundEstimator | None = None,
+    num_replicates: int = 200,
+) -> BootstrapSamples:
+    """Perform bootstrap sampling to return model parameter samples.
 
-    With ``samples``, resample paired stars and rebuild their KDE, then repeat
-    the specified refinement policy. Without samples, simulate multinomial
-    counts from the fitted prediction and hold its background shape fixed.
-    Winding and component count remain fixed in both cases. Derived model phases
-    are evaluated at ``model_phase_radius`` (0.5 by default).
+    Parameters
+    ----------
+    fitter : PSpiralFitter
+        The fitter used and to be used.
+    result : FitSuccess
+        An already successful fit that was produced by the given fitter.
+    z : Array1D[f64]
+        The z coordinates of the data that was the input to `result`.
+    vz : Array1D[f64]
+        The Vz velocities of the data that was the input to `result`.
+    z_edges : Array1D[f64]
+        The z bin edges used to produce `result`.
+    vz_edges : Array1D[f64]
+        The Vz bin edges used to produce `result`.
+    seed : int | None
+        The RNG seed to use or set to `None` to use a non-fixed seed.
+    background_estimator : BackgroundEstimator | None
+        The background estimator to use if given otherwise the default is Scott's rule Gaussian smoothing.
+    num_replicates : int
+        The number of replicates/samples.
 
-    Each replicate starts at the original estimate using a bounded local optimizer:
-    scaled L-BFGS-B for Python or scaled Nelder-Mead for Rust. ``maxiter=None``
-    uses the backend budget: 500 for Python, or the configured local iteration
-    budget for Rust (1500 by default). An explicit ``maxiter`` overrides that budget.
-    No global searches or retries are performed in this experimental version.
-    Failed/nonconverged draws remain in the result and are excluded from its
-    explicitly qualified summaries. The original fitter and fit are unchanged.
+    Returns
+    -------
+    samples : BootstrapSamples
+        The bootstrap samples.
 
-    Custom callbacks must be thread-safe for ``workers > 1``. Reusing ``seed``
-    preserves each draw when increasing ``n_resamples`` or changing worker count.
-    Both Python and Rust backends are supported. Callers must supply the same bounds,
-    mask, smoothing, and refinement configuration used for the original fit.
     """
-    if not np.isfinite(model_phase_radius) or model_phase_radius < 0:
-        msg = "model_phase_radius must be finite and nonnegative."
+    total_particles = len(z)
+    if len(z) != total_particles or len(vz) != total_particles:
+        msg = "`z` and `vz` must be equal length arrays."
         raise ValueError(msg)
-    backend = fitter._backend  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
-    if maxiter is None:
-        maxiter = backend.local_optimizer_maxiter
-    for name, value in (("n_resamples", n_resamples), ("workers", workers), ("maxiter", maxiter)):
-        if type(value) is not int or value < 1:
-            msg = f"{name} must be a positive integer."
-            raise ValueError(msg)
-    if type(seed) is not int or seed < 0:
-        msg = "seed must be a nonnegative integer."
-        raise ValueError(msg)
-    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
-        msg = "confidence_level must be between zero and one."
+    if total_particles < 1:
+        msg = "There are no particles."
         raise ValueError(msg)
 
-    model = result.final_model
-    reference = model.parameters.flatten().copy()
-    original_bounds = backend.component_bounds(model.num_components)
-    layout = ParameterLayout.from_bounds(original_bounds)
-    if not np.allclose(layout.unpack(layout.pack(reference)), reference, rtol=1e-10, atol=1e-10):
-        msg = "The fitter bounds are incompatible with the reference parameters."
-        raise ValueError(msg)
-    local_backend = backend.with_local_optimizer(maxiter=maxiter)
-    local_backend.update_bounds(
-        tuple(_local_bounds(bound, float(reference[6 * i + 3])) for i, bound in enumerate(original_bounds))
-    )
-    local_fitter = copy(fitter)
-    local_fitter._backend = local_backend  # noqa: SLF001  # pyright: ignore[reportPrivateUsage] -- package-internal integration.
-    scale = np.ones_like(reference)
-    scale[layout.free_indices] = layout.upper - layout.lower
-    exchangeable = model.num_components == 2 and str(original_bounds[0]) == str(original_bounds[1])
+    num_components = result.result.final_model.num_components
+    winding = result.result.final_model.winding
+    warm_start = result.result.final_model.to_array()
+    z_mesh = result.result.final_model.z_mesh
+    vz_mesh = result.result.final_model.vz_mesh
 
-    data = result.data
-    prediction = model.prediction()
-    if (
-        not np.all(np.isfinite(data))
-        or np.any(data < 0)
-        or not np.all(data == np.floor(data))
-        or np.sum(data) <= 0
-        or not np.all(np.isfinite(prediction))
-        or np.any(prediction < 0)
-        or np.sum(prediction) <= 0
-    ):
-        msg = "Bootstrap requires nonnegative integer counts and a finite nonnegative fitted prediction."
-        raise ValueError(msg)
-    total = int(np.sum(data))
-    probabilities = prediction.ravel() / np.sum(prediction)
-    if samples is not None:
-        _validate_samples(samples, result)
+    estimator = background_estimator if background_estimator is not None else estimate_gaussian_smooth_background_vz_mirrored
 
-    def run(index: int) -> BootstrapReplicate:
-        draw_seed, optimizer_seed = np.random.SeedSequence(seed, spawn_key=(index,)).spawn(2)
-        rng = np.random.default_rng(draw_seed)
-        optimizer_rng = np.random.default_rng(optimizer_seed)
-        outcome: BackendResult
-        if samples is None:
-            counts = rng.multinomial(total, probabilities).reshape(data.shape).astype(np.float64)
-            count_total = total
-            outcome = local_fitter.fit_spiral_with_background(
-                counts,
-                model.background,
-                model.z_mesh,
-                model.vz_mesh,
-                num_components=model.num_components,
-                winding=model.winding,
-                warm_start=reference,
-                rng=optimizer_rng,
-                improve_background=False,
-            )
-        else:
-            indices = rng.integers(samples.z.size, size=samples.z.size)
-            z, vz = samples.z[indices], samples.vz[indices]
-            counts, _, _ = np.histogram2d(z, vz, bins=(samples.z_bins, samples.vz_bins))
-            count_total = int(np.sum(counts))
-            outcome = local_fitter.fit_spiral(
-                z,
-                vz,
-                samples.z_bins,
-                samples.vz_bins,
-                num_components=model.num_components,
-                winding=model.winding,
-                warm_start=reference,
-                rng=optimizer_rng,
-                improve_background=samples.improve_background,
-            )
-        parameters = None
-        if isinstance(outcome, FitFailure):
-            reason = outcome.message
-        else:
-            reason = str(outcome.result.reason)
-            invalid = outcome.result.reason in (
-                FitTerminationReason.FAILED_REOPTIMIZATION,
-                FitTerminationReason.INVALID_BACKGROUND_UPDATE,
-            )
-            if outcome.diagnostics.success and not invalid:
-                parameters = _aligned(
-                    outcome.result.final_model.parameters.flatten(), reference, scale, exchangeable=exchangeable
-                )
-            elif not outcome.diagnostics.success:
-                reason = f"Local optimizer did not converge: {outcome.diagnostics.message}"
-        return BootstrapReplicate(index, parameters, outcome.diagnostics, reason, count_total)
+    rng: np.random.Generator = np.random.default_rng(seed)
 
-    if workers == 1:
-        replicates = tuple(run(i) for i in range(n_resamples))
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            replicates = tuple(executor.map(run, range(n_resamples)))
-    return _summarize(
-        replicates,
-        reference,
-        layout,
-        exchangeable=exchangeable,
-        method="parametric_counts" if samples is None else "samples",
-        confidence_level=confidence_level,
-        seed=seed,
-        maxiter=maxiter,
-        model_phase_radius=model_phase_radius,
-    )
+    inputs: list[FitInput] = []
 
+    for _ in range(num_replicates):
+        bootstrap_indices = rng.integers(0, total_particles, size=total_particles)
+        new_z = z[bootstrap_indices]
+        new_vz = vz[bootstrap_indices]
 
-def _summarize(
-    replicates: tuple[BootstrapReplicate, ...],
-    reference: onp.Array1D[np.float64],
-    layout: ParameterLayout,
-    *,
-    exchangeable: bool,
-    method: Literal["samples", "parametric_counts"],
-    confidence_level: float,
-    seed: int,
-    maxiter: int,
-    model_phase_radius: float,
-) -> BootstrapResult:
-    n_resamples = len(replicates)
-    parameters = np.full((n_resamples, reference.size), np.nan)
-    model_phases = np.full((n_resamples, reference.size // 6), np.nan)
-    for item in replicates:
-        if item.parameters is not None:
-            parameters[item.index] = item.parameters
-            for component, values in enumerate(item.parameters.reshape(-1, 6)):
-                model_phases[item.index, component] = PSpiralComponent.from_array(
-                    values, flattening_strength=0.1, winding=1
-                ).model_phase(model_phase_radius)
-    accepted_phases = model_phases[np.all(np.isfinite(parameters), axis=1)]
-    phase_errors = np.full(reference.size // 6, np.nan)
-    phase_intervals = np.full((reference.size // 6, 3), np.nan)
-    accepted = parameters[np.all(np.isfinite(parameters), axis=1)]
-    warnings = ["Experimental local-refit bootstrap; global-search adequacy and interval coverage have not been validated."]
-    if method == "parametric_counts":
-        warnings.append("Conditional on the fitted background, selected component count, and winding.")
-    else:
-        warnings.append("Conditional on selected component count, winding, and the original fitter configuration.")
-    if len(accepted) < n_resamples:
-        warnings.append(
-            f"{n_resamples - len(accepted)} of {n_resamples} replicates failed; summaries exclude them and may be biased."
+        density, _, _ = np.histogram2d(new_z, new_vz, bins=(z_edges, vz_edges))
+        density = density.T
+        background = estimator(
+            new_z,
+            new_vz,
+            z_edges,
+            vz_edges,
         )
-    if any(item.reason == FitTerminationReason.ITERATION_LIMIT for item in replicates):
-        warnings.append("Some replicates reached the background refinement limit.")
-    covariance = np.full((reference.size, reference.size), np.nan)
-    intervals = np.full((reference.size, 3), np.nan)
-    bias = np.full(reference.size, np.nan)
-    if len(accepted) >= 2:
-        covariance = np.asarray(np.cov(accepted, rowvar=False, ddof=1))
-        tail = (1 - confidence_level) / 2
-        intervals = np.quantile(accepted, [tail, 0.5, 1 - tail], axis=0).T
-        phase_errors = np.std(accepted_phases, axis=0, ddof=1)
-        phase_intervals = np.quantile(accepted_phases, [tail, 0.5, 1 - tail], axis=0).T
-        bias = accepted.mean(axis=0) - reference
-        fixed = np.ones(reference.size, dtype=np.bool_)
-        fixed[layout.free_indices] = False
-        covariance[fixed, :] = 0.0
-        covariance[:, fixed] = 0.0
-        bias[fixed] = 0.0
-        intervals[fixed, :] = reference[fixed, None]
-        free_values = accepted[:, layout.free_indices]
-        if np.any(np.isclose(free_values, layout.lower)) or np.any(np.isclose(free_values, layout.upper)):
-            warnings.append("Some free parameters touch bounds; percentile intervals may have poor coverage.")
-        if np.any(np.ptp(accepted[:, 3::6], axis=0) > np.pi):
-            warnings.append("Angular samples span more than half a period; linear summaries may be unreliable.")
-    else:
-        warnings.append("At least two accepted replicates are required; summaries are NaN.")
-    if exchangeable:
-        warnings.append("Exchangeable components were matched by scaled parameter distance; inspect for ambiguous assignments.")
-    return BootstrapResult(
-        reference=reference,
-        parameters=parameters,
-        covariance=covariance,
-        standard_errors=np.sqrt(np.diag(covariance)),
-        intervals=intervals,
-        bias=bias,
-        model_phases=model_phases,
-        model_phase_standard_errors=phase_errors,
-        model_phase_intervals=phase_intervals,
-        model_phase_radius=model_phase_radius,
-        replicates=replicates,
-        method=method,
-        confidence_level=confidence_level,
-        seed=seed,
-        maxiter=maxiter,
-        warnings=tuple(warnings),
-    )
+
+        inputs.append(
+            FitInput(
+                density=density,
+                background=background,
+                z_mesh=z_mesh,
+                vz_mesh=vz_mesh,
+                winding=winding,
+                num_components=num_components,
+                warm_start=warm_start,
+                # TODO(pavyamsiri): Get this from the result.
+                improve_background=True,
+            )
+        )
+
+    bootstrap_results = fitter.fit_batch(inputs, progress=True)
+    successes = [res for res in bootstrap_results if isinstance(res, FitSuccess)]
+    num_successes = len(successes)
+
+    num_parameters = len(warm_start)
+    all_parameters = np.zeros((num_parameters, num_successes))
+    model_phases = np.zeros((num_components, num_successes))
+
+    for idx, res in enumerate(successes):
+        all_parameters[:, idx] = res.result.final_model.to_array()
+        for component_idx in range(num_components):
+            model_phases[component_idx, idx] = res.result.final_model.components[component_idx].model_phase()
+
+    samples = all_parameters.reshape((6, num_components, num_successes))
+    return BootstrapSamples(parameters=samples, model_phases=model_phases)
+
+
+def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1) -> tuple[str, str]:
+    """Round a value with an associated error to the errors significant figures.
+
+    Parameters
+    ----------
+    value : float
+        The value to round.
+    error : float
+        The value's error to also round.
+    num_sig_figs : int
+        The number of significant figures to round the error to.
+
+    Returns
+    -------
+    rounded_value : float
+        The rounded value.
+    rounded_error : float
+        The rounded error.
+
+    """
+    if not np.isfinite(value) or not np.isfinite(error) or error <= 0:
+        return f"{value:.6g}", f"{error:.6g}"
+    order = np.floor(np.log10(error))
+    places = max(int(num_sig_figs - order - 1), 0)
+    return (np.format_float_positional(value, precision=places), np.format_float_positional(error, precision=places))

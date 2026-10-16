@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 
 from phasmix import component, fit, model
 from phasmix.uncertainty import (
-    BootstrapReplicate,
-    BootstrapResult,
     BootstrapSamples,
     ProfileInterval,
     ProfileLikelihoodResult,
@@ -21,8 +19,6 @@ if TYPE_CHECKING:
 
 
 __all__: Final[list[str]] = [
-    "BootstrapReplicate",
-    "BootstrapResult",
     "BootstrapSamples",
     "ProfileInterval",
     "ProfileLikelihoodResult",

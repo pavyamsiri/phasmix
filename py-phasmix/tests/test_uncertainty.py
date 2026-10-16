@@ -88,7 +88,7 @@ def test_sample_bootstrap_rebuilds_background_and_replays_refinement(backend_nam
     from phasmix import fit  # noqa: PLC0415 -- wrap the real preprocessing implementation.
 
     with (
-        patch("phasmix.fit.generate_initial_background", wraps=fit.generate_initial_background) as kde,
+        patch("phasmix.fit.generate_initial_background", wraps=fit.estimate_kde_background_vz_mirrored) as kde,
         patch("phasmix._python_backend.optimize.minimize", side_effect=AssertionError("all parameters fixed")),
         patch("phasmix._python_backend.optimize.differential_evolution", side_effect=AssertionError("global search")),
     ):

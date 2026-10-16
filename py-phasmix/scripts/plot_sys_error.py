@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from argparse import ArgumentParser
 from dataclasses import dataclass
 from itertools import combinations
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from scipy import ndimage, stats
 
-from phasmix import fit
+from phasmix import bootstrap_uncertainty, fit
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.component import PSpiralComponent
 from phasmix.fit import FitInput, FitSuccess, GaussianSmoothConfig, PSpiralFitter
@@ -208,8 +209,11 @@ def _generate_mock(parameters: onp.Array1D[np.float64]) -> MockData:
     )
 
 
-def main(*, exponent: int = 10, seed: int = 42, batch_size: int = 64, workers: int = 6) -> None:
+def main(*, num_replicates: int = 5) -> None:
     """Generate mocks, fit them, and plot parameter recovery."""
+    if num_replicates < 2:
+        msg = "At least two bootstrap replicates are needed to estimate error bars."
+        raise ValueError(msg)
     x_edges = np.linspace(-1.2, 1.2, 100 + 1)
     y_edges = np.linspace(-60.0, 60.0, 100 + 1)
     dz: float = np.mean(np.diff(x_edges))
@@ -230,43 +234,55 @@ def main(*, exponent: int = 10, seed: int = 42, batch_size: int = 64, workers: i
     measured_alphas = np.zeros_like(actual_alphas)
     measured_thetas = np.zeros_like(actual_thetas)
     measured_scales = np.zeros_like(actual_scales)
-    ratios: list[float] = []
-    for start in range(0, len(parameters), batch_size):
-        requests: list[FitInput] = []
-        stop = min(start + batch_size, len(parameters))
-        for idx in range(start, stop):
-            data = _generate_mock(parameters[idx])
-            actual_thetas[idx] = data.phase
-            actual_scales[idx] = data.scale_factor
-            initial_bg_sums[idx] = np.sum(data.background)
-            requests.append(
-                FitInput(
-                    density=data.density,
-                    background=data.background,
-                    z_mesh=data.x_mesh,
-                    vz_mesh=data.y_mesh,
-                    winding=1,
-                    num_components=1,
-                    improve_background=True,
-                )
+    alpha_errors = np.full_like(actual_alphas, np.nan)
+    angle_errors = np.full_like(actual_thetas, np.nan)
+    scale_errors = np.full_like(actual_scales, np.nan)
+    particles = []
+    requests: list[FitInput] = []
+    for idx, alpha in enumerate(actual_alphas):
+        data = _generate_mock(alpha)
+        actual_thetas[idx] = data.phase
+        actual_scales[idx] = data.scale_factor
+        particles.append((data.z, data.vz))
+        requests.append(
+            FitInput(
+                density=data.density,
+                background=data.background,
+                z_mesh=data.x_mesh,
+                vz_mesh=data.y_mesh,
+                winding=1,
+                num_components=1,
+                improve_background=True,
             )
-            del data
-        log.info("Fitting mocks %d-%d of %d...", start + 1, stop, len(parameters))
-        results = fitter.fit_batch(requests, workers=workers, progress=True)
-        for idx, result in enumerate(results, start=start):
-            if not isinstance(result, FitSuccess):
-                msg = f"Fit failed for Sobol point {idx}: {result}"
-                raise RuntimeError(msg)  # noqa: TRY004 - FitFailure is an expected outcome type.
-            measured_alphas[idx] = result.result.final_model.components[0].alpha
-            measured_thetas[idx] = result.result.final_model.components[0].model_phase()
-            measured_scales[idx] = result.result.final_model.components[0].scale_factor
-            ratio = np.sum(result.result.final_model.background) / initial_bg_sums[idx]
-            log.debug("Ratio = %f", ratio)
-            ratios.append(ratio)
-        del result, results, requests
-    ratios = np.asarray(ratios)
-    log.debug("Mean BG sum ratio = %f", np.mean(ratios))
-    log.debug("Median BG sum ratio = %f", np.median(ratios))
+        )
+    log.info("Starting fit...")
+    results = fitter.fit_batch(requests, workers=6, progress=True)
+    log.info("Fits complete...")
+    for idx, result in enumerate(results):
+        assert isinstance(result, FitSuccess)
+        measured_alphas[idx] = result.result.final_model.components[0].alpha
+        measured_thetas[idx] = result.result.final_model.components[0].model_phase()
+        measured_scales[idx] = result.result.final_model.components[0].scale_factor
+        log.info("Bootstrapping mock %d/%d with %d replicates", idx + 1, len(results), num_replicates)
+        z, vz = particles[idx]
+        samples = bootstrap_uncertainty(
+            fitter,
+            result,
+            z,
+            vz,
+            z_edges=x_edges,
+            vz_edges=y_edges,
+            num_replicates=num_replicates,
+            seed=idx,
+        )
+        if samples.parameters.shape[-1] < 2:
+            log.warning("Mock %d has fewer than two successful bootstrap fits; omitting its error bars", idx + 1)
+            continue
+        alpha_errors[idx] = samples.errors()[0, 0]
+        scale_errors[idx] = samples.errors()[4, 0]
+        phase_offsets = (samples.model_phases[0] - measured_thetas[idx] + np.pi) % (2 * np.pi) - np.pi
+        lower, upper = np.percentile(phase_offsets, [16, 84])
+        angle_errors[idx] = np.rad2deg((upper - lower) / 2)
 
     corr_fit = stats.linregress(actual_alphas, measured_alphas)
     slope, slope_error = round_value_with_error(corr_fit.slope, corr_fit.stderr)
@@ -312,6 +328,22 @@ def main(*, exponent: int = 10, seed: int = 42, batch_size: int = 64, workers: i
     )
     fig.colorbar(scale_points, ax=scale_axes, label=r"True $\alpha$")
 
+    for axes, actual, measured, errors, points in (
+        (alpha_axes, actual_alphas, measured_alphas, alpha_errors, alpha_points),
+        (theta_axes, actual_angles, measured_angles, angle_errors, theta_points),
+        (scale_axes, actual_scales, measured_scales, scale_errors, scale_points),
+    ):
+        axes.errorbar(
+            actual,
+            measured,
+            yerr=errors,
+            fmt="none",
+            ecolor=points.cmap(points.norm(points.get_array())),
+            elinewidth=0.8,
+            alpha=0.6,
+            zorder=1,
+        )
+
     plt.savefig("sys_error.png")
     plt.show()
     plt.close(fig)
@@ -345,18 +377,10 @@ def round_value_with_error(value: float, error: float, *, num_sig_figs: int = 1)
 
 
 if __name__ == "__main__":
-    _ = setup_logging()
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exponent", type=int, default=10, help="Sobol point count is 2**exponent (default: 1024).")
-    parser.add_argument("--seed", type=int, default=42, help="Seed for parameter-design scrambling only.")
-    parser.add_argument("--batch-size", type=int, default=64, help="Maximum mocks retained per fitting batch.")
-    parser.add_argument("--workers", type=int, default=6)
+    parser = ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--estimate-only", action="store_true", help="Report coverage and memory without generating or fitting mocks."
+        "--num-replicates", type=int, default=5, help="Bootstrap replicates per mock (default: 5, for plot formatting)."
     )
     args = parser.parse_args()
-    if not 1 <= args.exponent <= 20 or args.batch_size < 1 or args.workers < 1 or args.seed < 0:
-        parser.error("Require exponent in [1, 20], positive batch size/workers, and nonnegative seed.")
-    estimate_design(args.seed, args.batch_size, args.exponent)
-    if not args.estimate_only:
-        main(exponent=args.exponent, seed=args.seed, batch_size=args.batch_size, workers=args.workers)
+    _ = setup_logging()
+    main(num_replicates=args.num_replicates)
