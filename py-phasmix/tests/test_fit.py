@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from scipy.optimize import Bounds, OptimizeResult
 
+from phasmix._backends import GaussianSmoothConfig
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix._python_backend import PythonFitBackend
 from phasmix._rust_backend import RustFitBackend
@@ -76,7 +77,10 @@ def test_rust_backend_can_be_selected() -> None:
     assert isinstance(outcome, FitSuccess | FitFailure)
 
 
-def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("scales", [None, (1.0, 3.0), (3.0, 1.0)])
+def test_rust_backend_forwards_native_fitter_configuration(
+    monkeypatch: pytest.MonkeyPatch, scales: tuple[float, float] | None
+) -> None:
     """The adapter constructs the native fitter with backend-neutral options."""
     from phasmix.optimizers import TikTakConfig  # noqa: PLC0415 -- inspect normalized configuration.
 
@@ -91,7 +95,7 @@ def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.M
         max_iterations=7,
         atol=1e-3,
         rtol=2e-3,
-        smoothing_func=None,
+        smoothing_func=None if scales is None else GaussianSmoothConfig(z_scale=scales[0], vz_scale=scales[1]),
         mask_func=None,
         bounds=None,
     )
@@ -102,8 +106,8 @@ def test_rust_backend_forwards_native_fitter_configuration(monkeypatch: pytest.M
             "max_iterations": 7,
             "atol": 1e-3,
             "rtol": 2e-3,
-            "sigma_z": 2.0,
-            "sigma_vz": 2.0,
+            "sigma_z": 2.0 if scales is None else scales[0],
+            "sigma_vz": 2.0 if scales is None else scales[1],
             "bounds": (RustFitBackend._rust_bounds_for_component(ParameterBounds()),),  # noqa: SLF001
             "optimizer": TikTakConfig(),
         }

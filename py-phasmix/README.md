@@ -267,6 +267,9 @@ before normalizing to the observed count within the fitting region. This support
 unequal widths using a midpoint approximation, not an exact integral over each
 bin. Already-binned backgrounds should represent counts per cell, not density.
 
+Both backends accept independent Gaussian refinement widths via
+`GaussianSmoothConfig(z_scale=1.0, vz_scale=3.0)`, measured in grid cells along
+columns (`z`) and rows (`vz`), respectively.
 The default refinement smoother operates in grid-cell units. On unequal bins,
 it is not a uniform physical-width kernel; supply a custom `smoothing_func` or
 disable refinement when that distinction matters.

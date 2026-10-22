@@ -159,9 +159,6 @@ class RustFitBackend(FitBackend):
 
         if isinstance(config, SmoothConfig):
             if isinstance(config, GaussianSmoothConfig):
-                if config.z_scale != config.vz_scale:
-                    msg = "The Rust backend currently requires equal Gaussian smoothing scales."
-                    raise ValueError(msg)
                 return config
             msg = f"Unsupported smoothing config: {config}"
             raise ValueError(msg)
