@@ -244,6 +244,8 @@ def test_background_refinement_result_consistency(
     final = outcome.result
     np.testing.assert_array_equal(final.initial_model.background, initial_background)
     assert final.lnl == pytest.approx(ln_likelihood(data, final.final_model.prediction(), mask))  # pyright: ignore[reportUnknownMemberType]
+    assert final.initial_background_lnl == pytest.approx(ln_likelihood(data, final.initial_model.background, mask))
+    assert final.final_background_lnl == pytest.approx(ln_likelihood(data, final.final_model.background, mask))
     assert final.reason is expected_reason
     assert final.num_iterations == expected_iterations
     assert smoothing_calls == len(updates)

@@ -721,6 +721,8 @@ class PythonFitBackend(FitBackend):
         # Store the winning scale without mutating the caller's background.
         model.background = background * (density_total / prediction_total)
         final_lnl = ln_likelihood(density, model.prediction(), mask)
+        initial_background_lnl = ln_likelihood(density, model.background, mask)
+        final_background_lnl = initial_background_lnl
         if not np.isfinite(final_lnl):
             return FitFailure(
                 reason=FitFailureReason.NO_VALID_CANDIDATE, message="Normalized prediction is invalid.", diagnostics=diagnostics
@@ -733,6 +735,8 @@ class PythonFitBackend(FitBackend):
                 num_iterations=0,
                 max_iterations=self._max_iterations,
                 lnl=final_lnl,
+                initial_background_lnl=initial_background_lnl,
+                final_background_lnl=final_background_lnl,
                 reason=FitTerminationReason.FIXED_BACKGROUND,
             ),
             diagnostics=diagnostics,
@@ -768,6 +772,8 @@ class PythonFitBackend(FitBackend):
                         initial_model=initial_model,
                         final_model=current_model,
                         lnl=current_lnl,
+                        initial_background_lnl=initial_fit.result.initial_background_lnl,
+                        final_background_lnl=ln_likelihood(initial_fit.result.data, current_model.background, mask),
                         data=initial_density,
                         num_iterations=num_iterations,
                         max_iterations=self._max_iterations,
@@ -797,6 +803,8 @@ class PythonFitBackend(FitBackend):
                         initial_model=initial_model,
                         final_model=current_model,
                         lnl=current_lnl,
+                        initial_background_lnl=initial_fit.result.initial_background_lnl,
+                        final_background_lnl=ln_likelihood(initial_fit.result.data, current_model.background, mask),
                         data=initial_density,
                         num_iterations=num_iterations,
                         max_iterations=self._max_iterations,
@@ -813,6 +821,8 @@ class PythonFitBackend(FitBackend):
                         initial_model=initial_model,
                         final_model=current_model,
                         lnl=current_lnl,
+                        initial_background_lnl=initial_fit.result.initial_background_lnl,
+                        final_background_lnl=ln_likelihood(initial_fit.result.data, current_model.background, mask),
                         data=initial_density,
                         num_iterations=num_iterations,
                         max_iterations=self._max_iterations,
@@ -839,6 +849,8 @@ class PythonFitBackend(FitBackend):
                 initial_model=initial_model,
                 final_model=accepted[0],
                 lnl=accepted[1],
+                initial_background_lnl=initial_fit.result.initial_background_lnl,
+                final_background_lnl=ln_likelihood(initial_density, accepted[0].background, mask),
                 data=initial_density,
                 num_iterations=num_iterations,
                 max_iterations=self._max_iterations,

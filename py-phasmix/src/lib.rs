@@ -161,6 +161,10 @@ pub struct PSpiralFitResult {
     #[pyo3(get)]
     pub lnl: f64,
     #[pyo3(get)]
+    pub initial_background_lnl: f64,
+    #[pyo3(get)]
+    pub final_background_lnl: f64,
+    #[pyo3(get)]
     pub initial_pvalue: f64,
     #[pyo3(get)]
     pub final_pvalue: f64,
@@ -212,6 +216,8 @@ impl PSpiralFitIterator {
             max_iterations: res.max_iterations,
             converged: res.converged,
             lnl: res.final_lnl,
+            initial_background_lnl: initial_null,
+            final_background_lnl: final_null,
             initial_pvalue: dist.sf(-2.0 * (initial_null - res.initial_lnl)),
             final_pvalue: dist.sf(-2.0 * (final_null - res.final_lnl)),
             nfev: res.nfev,
@@ -296,6 +302,8 @@ impl PSpiralFitter {
             max_iterations: res.max_iterations,
             converged: res.converged,
             lnl: res.final_lnl,
+            initial_background_lnl: lnl_initial_null,
+            final_background_lnl: lnl_final_null,
             initial_pvalue,
             final_pvalue,
             nfev: res.nfev,

@@ -445,6 +445,8 @@ class RustFitBackend(FitBackend):
             num_iterations=rust_result.num_iterations,
             max_iterations=rust_result.max_iterations,
             lnl=rust_result.lnl,
+            initial_background_lnl=rust_result.initial_background_lnl,
+            final_background_lnl=rust_result.final_background_lnl,
             reason=reason,
         )
 

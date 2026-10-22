@@ -14,7 +14,7 @@ from phasmock.recipe import MockRecipe
 from rich.console import Console
 from rich.logging import RichHandler
 
-from phasmix import BootstrapSamples, fit
+from phasmix import fit
 from phasmix._likelihood_utils import ln_likelihood
 from phasmix.background_estimators import estimate_gaussian_smooth_background_vz_mirrored
 from phasmix.fit import FitSuccess, PSpiralFitter
@@ -145,7 +145,10 @@ def _main() -> None:
     log.info("Rust nfev: %d", outcome_rust.diagnostics.nfev)
     log.info("Rust termination: %s", res_rust.reason)
     log.info("Rust final model: %s", res_rust.final_model)
+    log.info("Rust winding: %s", res_rust.final_model.winding)
     log.info("Rust final lnl: %.2f", res_rust.lnl)
+    log.info("Rust final background lnl: %.2f", res_rust.final_background_lnl)
+    log.info("Rust initial background lnl: %.2f", res_rust.initial_background_lnl)
     log.info("Rust pvalue: %f", res_rust.final_model.pvalue(density, mask))
 
     log.info("--- Python Version ---")
@@ -174,7 +177,10 @@ def _main() -> None:
     log.info("Python nfev: %d", outcome_py.diagnostics.nfev)
     log.info("Python termination: %s", res_py.reason)
     log.info("Python final model: %s", res_py.final_model)
+    log.info("Python winding: %s", res_py.final_model.winding)
     log.info("Python final lnl: %.2f", res_py.lnl)
+    log.info("Python final background lnl: %.2f", res_py.final_background_lnl)
+    log.info("Python initial background lnl: %.2f", res_py.initial_background_lnl)
     log.info("Python pvalue: %f", res_py.final_model.pvalue(density, mask))
 
     _compare_uncertainty(fitter_py, fitter_rust, outcome_rust, z, vz, z_edges=z_edges, vz_edges=vz_edges)

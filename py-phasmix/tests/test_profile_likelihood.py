@@ -236,6 +236,8 @@ def test_two_component_profiles_keep_component_order_and_fixed_values() -> None:
         num_iterations=0,
         max_iterations=0,
         lnl=0.0,
+        initial_background_lnl=0.0,
+        final_background_lnl=0.0,
         reason=FitTerminationReason.FIXED_BACKGROUND,
     )
     summary = profile_likelihood(fitter, result, model_phase_radius=0.7)

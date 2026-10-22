@@ -218,6 +218,10 @@ class PSpiralFitResult:
         The maximum number of background refinement attempts, or None for no limit.
     lnl : float
         The score of final_model.prediction() against data and the fitting mask.
+    initial_background_lnl : float
+        The score of initial_model.background against data and the fitting mask.
+    final_background_lnl : float
+        The score of final_model.background against data and the fitting mask.
     reason : FitTerminationReason
         The reason fitting stopped.
 
@@ -229,6 +233,8 @@ class PSpiralFitResult:
     num_iterations: int
     max_iterations: int | None
     lnl: float
+    initial_background_lnl: float
+    final_background_lnl: float
     reason: FitTerminationReason
 
 

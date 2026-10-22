@@ -37,6 +37,8 @@ def test_warm_start_paths(optimizer: Literal["tiktak", "differential_evolution",
         warm_start=parameters,
     )
     assert isinstance(single, FitSuccess)
+    assert single.result.initial_background_lnl == pytest.approx(0.0)
+    assert single.result.final_background_lnl == pytest.approx(0.0)
     np.testing.assert_array_equal(single.result.final_model.to_array(), parameters)
     events = list(
         fitter.fit_spiral_with_background_gen(
@@ -51,6 +53,8 @@ def test_warm_start_paths(optimizer: Literal["tiktak", "differential_evolution",
         )
     )
     assert isinstance(events[-1], FitSuccess)
+    assert events[-1].result.initial_background_lnl == single.result.initial_background_lnl
+    assert events[-1].result.final_background_lnl == single.result.final_background_lnl
     item = FitInput(
         density=grid,
         background=grid,
@@ -64,6 +68,8 @@ def test_warm_start_paths(optimizer: Literal["tiktak", "differential_evolution",
     for result in fitter.fit_batch([item, item], workers=2):
         assert isinstance(result, FitSuccess)
         np.testing.assert_array_equal(result.result.final_model.to_array(), parameters)
+        assert result.result.initial_background_lnl == single.result.initial_background_lnl
+        assert result.result.final_background_lnl == single.result.final_background_lnl
         assert result.diagnostics.nfev == single.diagnostics.nfev
 
 
