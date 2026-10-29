@@ -8,16 +8,14 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from scipy import optimize  # noqa: F401 -- retained as a compatibility patch target for callers/tests.
 
-from phasmix._backends import FitBackend, FitRequest
-from phasmix._python_backend import PythonFitBackend
-from phasmix._rust_backend import RustFitBackend
-
-from ._backends import (
+from phasmix._backends import (
     BackendEvent,
     BackendResult,
+    FitBackend,
     FitFailure,
     FitFailureReason,
     FitProgress,
+    FitRequest,
     FitSuccess,
     FitTerminationReason,
     GaussianSmoothConfig,
@@ -28,16 +26,19 @@ from ._backends import (
     SigmoidMaskConfig,
     SmoothConfig,
 )
-from ._python_backend import create_gaussian_smoother, create_sigmoid_mask
-from .background_estimators import BackgroundEstimator, estimate_kde_background_vz_mirrored
-from .bounds import Fixed, Interval, ParameterBounds
+from phasmix._python_backend import PythonFitBackend, create_gaussian_smoother, create_sigmoid_mask
+from phasmix._rust_backend import RustFitBackend
+from phasmix.background_estimators import BackgroundEstimator, estimate_kde_background_vz_mirrored
+from phasmix.bounds import Fixed, Interval, ParameterBounds
+
+from . import ttg_fourier
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
     from optype import numpy as onp
 
-    from .optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
+    from phasmix.optimizers import DifferentialEvolutionConfig, NelderMeadConfig, TikTakConfig
 
 
 type _SmoothingFunc = Callable[[onp.Array2D[np.float64]], onp.Array2D[np.float64]]
@@ -66,6 +67,7 @@ __all__: list[str] = [
     "SmoothConfig",
     "create_gaussian_smoother",
     "create_sigmoid_mask",
+    "ttg_fourier",
 ]
 
 type FitOutcome = BackendResult
