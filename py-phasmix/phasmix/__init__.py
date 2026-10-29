@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from phasmix import component, fit, model
+from phasmix import component, data, fit, model
 from phasmix.uncertainty import (
     BootstrapSamples,
     ProfileInterval,
@@ -25,6 +25,7 @@ __all__: Final[list[str]] = [
     "ProfilePoint",
     "bootstrap_uncertainty",
     "component",
+    "data",
     "fit",
     "model",
     "profile_likelihood",
