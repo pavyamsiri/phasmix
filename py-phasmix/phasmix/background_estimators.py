@@ -171,3 +171,103 @@ def estimate_gaussian_smooth_background_vz_mirrored(
     smoothed_density = ndimage.gaussian_filter(density, sigma=(hvz, hz))
 
     return 0.5 * (smoothed_density + np.flipud(smoothed_density))
+
+
+def estimate_gaussian_smooth_background_axisymmetric(
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
+    z_edges: onp.Array1D[np.float64],
+    vz_edges: onp.Array1D[np.float64],
+) -> onp.Array2D[np.float64]:
+    """Generate an axisymmetric background as the initial background estimate via Gaussian smoothing on a grid.
+
+    Parameters
+    ----------
+    z : Array1D[f64]
+        The z coordinate of the stars.
+    vz : Array1D[f64]
+        The Vz velocity of the stars.
+    z_edges : Array1D[f64]
+        The z edges.
+    vz_edges : Array1D[f64]
+        The vz edges.
+
+    Returns
+    -------
+    background : Array2D[f64]
+        Symmetric background in units of counts.
+
+    """
+    num_radial_bins: int = 100
+    radial_sigma: float = 2.0
+    scale_factor = estimate_scale_factor(z, vz)
+    r = np.hypot(z, vz / scale_factor)
+
+    # Construct the output grid.
+    z_centres = 0.5 * (z_edges[:-1] + z_edges[1:])
+    vz_centres = 0.5 * (vz_edges[:-1] + vz_edges[1:])
+
+    zz, vv = np.meshgrid(z_centres, vz_centres)
+    rr = np.hypot(zz, vv / scale_factor)
+
+    # Radial bins covering the output domain.
+    r_edges = np.linspace(0.0, np.max(rr) * 1.001, num_radial_bins + 1)
+    r_centres = 0.5 * (r_edges[:-1] + r_edges[1:])
+
+    # Estimate radial density.
+    counts, _ = np.histogram(r, bins=r_edges)
+
+    # Annular areas in transformed (z, Vz / scale_factor) space.
+    areas = np.pi * (r_edges[1:] ** 2 - r_edges[:-1] ** 2)
+
+    radial_density = counts / areas
+
+    # Smooth only in the radial direction.
+    radial_density = ndimage.gaussian_filter1d(
+        radial_density,
+        sigma=radial_sigma,
+        mode="reflect",
+    )
+
+    # Reconstruct the axisymmetric 2D background.
+    background = np.interp(
+        rr.ravel(),
+        r_centres,
+        radial_density,
+        left=radial_density[0],
+        right=radial_density[-1],
+    ).reshape(rr.shape)
+
+    # Convert to expected counts per grid cell.
+    dz = np.diff(z_edges)
+    dvz = np.diff(vz_edges)
+
+    cell_areas = dvz[:, None] * dz[None, :] / scale_factor
+    background *= cell_areas
+
+    # Preserve the total number of particles.
+    background *= len(z) / background.sum()
+
+    return background
+
+
+def estimate_scale_factor(
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
+) -> float:
+    """Estimate the elliptical phase-space scale factor from particles.
+
+    Parameters
+    ----------
+    z : Array1D[f64]
+        The z coordinate.
+    vz : Array1D[f64]
+        The Vz velocity.
+
+    Returns
+    -------
+    s : float
+        The estimated scale factor.
+
+    """
+    return float(np.std(vz) / np.std(z))
