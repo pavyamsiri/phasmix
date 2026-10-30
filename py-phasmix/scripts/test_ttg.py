@@ -6,11 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-from matplotlib import colors as mplcolors
 from matplotlib import pyplot as plt
 from phasmock.component import AlinderComponent, GaussianComponent
 from phasmock.mock import MockModel
-from scipy import stats
 
 from phasmix.fit.ttg_fourier import compute_ttg_coefficients, detect_ttg_phase_spiral
 
@@ -39,7 +37,7 @@ def _generate_mock() -> MockData:
         c=0.0,
         theta0=0.0,
         scale_factor=1.00,
-        rho=0.0,
+        rho=2.0,
         winding=-1,
     )
     background_comp = GaussianComponent(x_scale=1, y_scale=1.0, amplitude=1, variance=4.0)
@@ -77,8 +75,6 @@ def _generate_mock() -> MockData:
 
 def main() -> None:
     true_alpha: float = 0.5
-    slope_threshold: float = 0.1
-    scatter_threshold: float = 0.3
     num_r_bins: int = 20
 
     data = _generate_mock()
@@ -91,16 +87,10 @@ def main() -> None:
 
     theta = np.arctan2(data.y_samples, data.x_samples)
     coeffs = compute_ttg_coefficients(r, theta, r_edges=r_edges, max_mode=6)
-    res = detect_ttg_phase_spiral(coeffs, slope_threshold=slope_threshold, scatter_threshold=scatter_threshold)
+    res = detect_ttg_phase_spiral(coeffs)
 
-    amps = np.abs(coeffs.coefficients) / np.abs(coeffs.coefficients[:, 0])[:, None]
+    amps = res.amps
     phase = res.phase
-
-    phase_fit = stats.linregress(r_centres, phase)
-
-    predicted = phase_fit.slope * r_centres + phase_fit.intercept
-    strength = np.median(amps[:, 1])
-    scatter = np.sqrt(np.mean(np.square(phase - predicted)))
 
     points_x = r_centres * np.cos(phase)
     points_y = r_centres * np.sin(phase)
@@ -112,10 +102,13 @@ def main() -> None:
     criteria_display = {False: "FAIL", True: "PASS"}
 
     title_text: list[str] = [
-        rf"$A = {strength:.3f}, \,\, \nabla(\phi) = {phase_fit.slope:.2f}, \,\, \sigma(\nabla\phi) = {scatter:.2f}$",
-        rf"$\nabla(\phi)_{{\mathrm{{th}}}} = {slope_threshold:.2f}, \,\, \sigma(\nabla\phi)_{{\mathrm{{th}}}} = {scatter_threshold:.2f}$",
-        f"Amp: {criteria_display[amp_criterion]}, Slope: {criteria_display[slope_criterion]}, Scatter: {criteria_display[scatter_criterion]}",
-        rf"$\alpha = {true_alpha:.2f}, \,\, \tilde{{\alpha}} = 2 A = {(2 * strength):.3f}$",
+        rf"$A = {res.strength:.3f}, \,\, \nabla(\phi) = {res.slope:.2f}, \,\, \sqrt{{\mathrm{{SSR}}}} = {res.scatter:.2f}$",
+        rf"$|\nabla\phi| \geq {res.slope_threshold:.3f}, \,\, \sigma_s/|s| < {res.slope_err_threshold:.2f}, \,\, "
+        rf"\sqrt{{\mathrm{{SSR}}}} < {res.scatter_threshold:.2f}$",
+        f"Amp: {criteria_display[amp_criterion]}, Slope: {criteria_display[slope_criterion]}, "
+        f"Scatter: {criteria_display[scatter_criterion]}",
+        f"Slope error: {res.slope_relative_error:.1%} ({criteria_display[res.slope_error_criterion]})",
+        rf"$\alpha = {true_alpha:.2f}, \,\, \tilde{{\alpha}} = 2 A = {(2 * res.strength):.3f}$",
     ]
 
     fig = plt.figure()
@@ -133,12 +126,13 @@ def main() -> None:
 
     _ = phase_axes.plot(
         r_centres,
-        predicted,
-        label=rf"Linear fit: $\phi = {phase_fit.slope:.2f}r + {phase_fit.intercept:.2f}$",
+        res.predicted,
+        label=rf"Linear fit: $\phi = {res.slope:.2f}r + {res.intercept:.2f}$",
         ls="--",
         color="tab:blue",
     )
-    _ = phase_axes.scatter(r_centres, phase, label=f"m={1}", color="tab:orange")
+    _ = phase_axes.scatter(r_centres[res.fit_mask], phase[res.fit_mask], label="Used in fit", color="tab:orange")
+    _ = phase_axes.scatter(r_centres[~res.fit_mask], phase[~res.fit_mask], label="Excluded from fit", color="grey", marker="x")
     _ = phase_axes.legend()
 
     plt.show()
