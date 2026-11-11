@@ -45,6 +45,8 @@ type _MaskFunc = Callable[[onp.Array2D[np.float64], onp.Array2D[np.float64]], on
 
 log: Final[logging.Logger] = logging.getLogger(__name__)
 
+PERTURBATION_FLOOR: Final[float] = 1e-10
+
 
 def create_gaussian_smoother(z_scale: float, vz_scale: float) -> _SmoothingFunc:
     """Return a function that applies Gaussian smoothing to a 2D array.
@@ -763,7 +765,7 @@ class PythonFitBackend(FitBackend):
 
             current_model, current_lnl = accepted
             current_perturbation = current_model.signal()
-            new_background = self._smoothing_func(initial_density / current_perturbation)
+            new_background = self._smoothing_func(initial_density / np.maximum(current_perturbation, PERTURBATION_FLOOR))
             self._validate_callback_shape("smoothing_func", new_background, initial_density.shape)
 
             if not self._valid_background(new_background):
