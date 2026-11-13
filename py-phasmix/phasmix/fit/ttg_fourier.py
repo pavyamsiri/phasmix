@@ -14,7 +14,13 @@ if TYPE_CHECKING:
 
     from optype import numpy as onp
 
-__all__: Final[list[str]] = ["TTGCoeffs", "TTGResult", "compute_ttg_coefficients", "detect_ttg_phase_spiral"]
+__all__: Final[list[str]] = [
+    "TTGCoeffs",
+    "TTGResult",
+    "compute_ttg_coefficients",
+    "compute_ttg_coefficients_grid",
+    "detect_ttg_phase_spiral",
+]
 
 
 @dataclass(frozen=True)
@@ -27,17 +33,57 @@ class TTGCoeffs:
         The Fourier coefficients in the shape (num_r_bins, num_modes).
     r_edges : Array1D[f64]
         The bin edges in phase radius with shape (num_r_bins + 1,).
+    orientation : float
+        Phase of the m=1 mode in the orientation annulus, in [-pi, pi] radians.
+        The annulus is centred on 0.5 kpc by default.
 
     """
 
     coefficients: onp.Array2D[np.complex128]
     r_edges: onp.Array1D[np.float64]
+    orientation: float
 
     def __post_init__(self) -> None:
+        """Validate that each radial bin has a row of coefficients."""
         num_r_bins = len(self.r_edges) - 1
         if self.coefficients.shape[0] != num_r_bins:
             msg = f"Expected {num_r_bins} for the coefficients array but {self.coefficients.shape}"
             raise ValueError(msg)
+
+    def reconstruct(self, r_mesh: onp.Array2D[np.float64], theta_mesh: onp.Array2D[np.float64]) -> onp.Array2D[np.float64]:
+        """Reconstruct counts per pixel on a uniform phase-space mesh.
+
+        Parameters
+        ----------
+        r_mesh : Array2D[f64]
+            Radius of each pixel, in the same units as ``r_edges``.
+        theta_mesh : Array2D[f64]
+            Angle of each pixel in radians, with the same shape as ``r_mesh``.
+
+        Returns
+        -------
+        Array2D[f64]
+            Truncated Fourier reconstruction with the input mesh shape.
+            Pixels outside the radial bins are zero. Complete annuli are
+            required for the usual Fourier normalization.
+
+        """
+        r_edges = self.r_edges
+        binnumber = np.digitize(r_mesh.flatten(), r_edges).reshape(r_mesh.shape)
+
+        recons = np.zeros_like(r_mesh)
+
+        for i in range(len(r_edges) - 1):
+            mask = binnumber == (i + 1)
+            num_pixels = np.count_nonzero(mask)
+            if num_pixels == 0:
+                continue
+
+            c = self.coefficients[i] / num_pixels
+            recons[mask] += np.real(c[0])
+            for m in range(1, len(c)):
+                recons[mask] += 2 * np.real(c[m] * np.exp(-1j * m * theta_mesh[mask]))
+        return recons
 
 
 @dataclass(frozen=True)
@@ -48,60 +94,74 @@ class TTGResult:
     ----------
     strength : float
         The phase spiral strength equal to median(A1/A0) over the bins in phase radius.
+    strength_m2 : float
+        Median A2/A0 over the same selected bins as ``strength``.
+        NaN if mode 2 was not computed.
     phase : Array1D[f64]
         The phase angle of the m=1 mode over the phase radius bins with shape (num_r_bins,).
+    orientation : float
+        Phase of the separate orientation annulus, in [-pi, pi] radians.
+        NaN when that annulus has no measurable m=1 coefficient.
     r_edges : Array1D[f64]
         The bin edges in phase radius with shape (num_r_bins + 1,).
     is_spiral : bool
         Whether a phase spiral was detected meaning it has passed all four criteria.
     amp_criterion : bool
-        Whether the radial mean of A1/A0 exceeds that of each mode m >= 2.
+        Whether the radial mean of A1/Am is at least one for every mode m >= 2.
     slope_criterion : bool
         Whether the slope criterion was passed, that is the fitted slope's magnitude is greater than some threshold.
-    scatter_criterion : bool
-        Whether sqrt(SSR) of the phase residuals is strictly below the scatter threshold.
     slope_error_criterion : bool
-        Whether the relative slope error is strictly below its threshold.
+        Whether the fitted slope's standard error is at most its threshold.
+    monotonicity_criterion : bool
+        Whether the selected unwrapped phases are nondecreasing or nonincreasing.
     amps : Array2D[f64]
         Amplitudes normalised by A0, with shape (num_r_bins, num_modes).
     fit_mask : Array1D[bool]
-        Bins where mode 1 dominates every higher mode, used for the phase fit.
-    slope, intercept, slope_stderr, slope_relative_error, scatter : float
-        Masked linear fit diagnostics; scatter is sqrt(SSR) in radians.
-        All are NaN if fewer than three bins pass the mask.
-    predicted : Array1D[f64]
-        Fitted phase evaluated at all radial bin centres, or NaN when no fit is available.
-    slope_threshold, slope_err_threshold, scatter_threshold : float
-        Thresholds used for this detection.
+        Interior radial bins used for strength, amplitude ratios, and fitting.
+    slope, slope_err : float
+        Linear phase slope and its standard error in radians per radial unit.
+    intercept, intercept_err : float
+        Linear phase intercept and its standard error in radians.
+    slope_threshold, slope_err_threshold : float
+        Minimum absolute slope and maximum slope standard error.
     winding : -1 or +1
-        Sign of the fitted slope; defaults to -1 when no fit is available.
+        Sign of the fitted slope, with zero assigned +1.
 
     """
 
     strength: float
+    strength_m2: float
+    amps: onp.Array2D[np.float64]
     phase: onp.Array1D[np.float64]
+    orientation: float
+    fit_mask: onp.Array1D[np.bool_]
     r_edges: onp.Array1D[np.float64]
+    winding: Literal[-1, 1]
+    slope_threshold: float
+    slope_err_threshold: float
+
+    # Fit
+    slope: float
+    slope_err: float
+    intercept: float
+    intercept_err: float
+
+    # Criteria
     is_spiral: bool
     amp_criterion: bool
     slope_criterion: bool
-    scatter_criterion: bool
     slope_error_criterion: bool
-    winding: Literal[-1, 1]
-    amps: onp.Array2D[np.float64]
-    fit_mask: onp.Array1D[np.bool_]
-    slope: float
-    intercept: float
-    slope_stderr: float
-    slope_relative_error: float
-    scatter: float
-    predicted: onp.Array1D[np.float64]
-    slope_threshold: float
-    slope_err_threshold: float
-    scatter_threshold: float
+    monotonicity_criterion: bool
 
 
 def compute_ttg_coefficients(
-    r: onp.Array1D[np.float64], thetaz: onp.Array1D[np.float64], *, r_edges: onp.Array1D[np.float64], max_mode: int
+    r: onp.Array1D[np.float64],
+    thetaz: onp.Array1D[np.float64],
+    *,
+    r_edges: onp.Array1D[np.float64],
+    max_mode: int,
+    orientation_centre: float = 0.5,
+    orientation_width: float = 0.1,
 ) -> TTGCoeffs:
     """Compute the Fourier coefficients in a series of rings in phase radius.
 
@@ -115,6 +175,12 @@ def compute_ttg_coefficients(
         The conjugate angle of the stars in the sample in units of radians.
     r_edges : Array1D[f64]
         The bin edges in phase radius.
+    max_mode : int
+        Highest Fourier mode to compute, including all modes from zero.
+    orientation_centre : float
+        The radius at which to calculate the orientation at in kpc.
+    orientation_width : float
+        Full width in kpc of the separate annulus centred on `orientation_centre` kpc.
 
     Returns
     -------
@@ -122,22 +188,103 @@ def compute_ttg_coefficients(
         The computed Fourier coefficients.
 
     """
-    num_r_bins = len(r_edges) - 1
-    num_modes = max_mode + 1
-    coefficients = np.full((num_r_bins, num_modes), np.nan, dtype=np.complex128)
+    return _compute_annular_coefficients(
+        r,
+        thetaz,
+        np.ones_like(r),
+        r_edges=r_edges,
+        max_mode=max_mode,
+        orientation_centre=orientation_centre,
+        orientation_width=orientation_width,
+    )
 
-    for r_index, (r_min, r_max) in enumerate(itertools.pairwise(r_edges)):
-        for m in range(num_modes):
-            mask = np.logical_and(r >= r_min, r < r_max)
 
-            current_theta = thetaz[mask]
-            coefficients[r_index, m] = np.sum(np.exp(1j * m * current_theta))
+def compute_ttg_coefficients_grid(
+    counts: onp.Array2D[np.float64],
+    r_mesh: onp.Array2D[np.float64],
+    phi_mesh: onp.Array2D[np.float64],
+    *,
+    r_extent: tuple[float, float],
+    max_mode: int,
+    num_bins: int,
+    orientation_centre: float = 0.5,
+    orientation_width: float = 0.1,
+) -> TTGCoeffs:
+    """Compute the Fourier coefficients in a series of rings in phase radius.
 
-    return TTGCoeffs(coefficients=coefficients, r_edges=r_edges)
+    Step 1 of the Tepper-Garcia et al. 2025 phase spiral finding method.
+
+    Parameters
+    ----------
+    counts : Array2D[f64]
+        Star counts per pixel on a uniform phase-space grid.
+    r_mesh : Array2D[f64]
+        Radius of each pixel in kpc, with the same shape as ``counts``.
+    phi_mesh : Array2D[f64]
+        Angle of each pixel in radians, with the same shape as ``counts``.
+    r_extent : tuple[float, float]
+        Lower and upper radial limits in kpc.
+    max_mode : int
+        Highest Fourier mode to compute, including all modes from zero.
+    num_bins : int
+        Number of equally spaced radial bins within ``r_extent``.
+    orientation_centre : float
+        The radius at which to calculate the orientation at in kpc.
+    orientation_width : float
+        Full width in kpc of the separate annulus centred on `orientation_centre` kpc.
+
+    Returns
+    -------
+    TTGCoeffs
+        The computed Fourier coefficients.
+
+    """
+    radial_bins = np.linspace(r_extent[0], r_extent[1], num_bins + 1)
+    return _compute_annular_coefficients(
+        r_mesh.ravel(),
+        phi_mesh.ravel(),
+        counts.ravel(),
+        r_edges=radial_bins,
+        max_mode=max_mode,
+        orientation_centre=orientation_centre,
+        orientation_width=orientation_width,
+    )
+
+
+def _compute_annular_coefficients(
+    r: onp.Array1D[np.float64],
+    theta: onp.Array1D[np.float64],
+    weights: onp.Array1D[np.float64],
+    *,
+    r_edges: onp.Array1D[np.float64],
+    max_mode: int,
+    orientation_centre: float,
+    orientation_width: float,
+) -> TTGCoeffs:
+    """Process the radial bins and extra orientation annulus in one Fourier pass."""
+    if not np.isfinite(orientation_width) or not 0 < orientation_width <= 1.0:
+        msg = "`orientation_width` must be finite and in (0, 1] kpc"
+        raise ValueError(msg)
+    annuli: list[tuple[float, float]] = list(itertools.pairwise(r_edges))
+    annuli.append((orientation_centre - orientation_width / 2, orientation_centre + orientation_width / 2))
+    values_list: list[onp.Array1D[np.float64]] = []
+    phis_list: list[onp.Array1D[np.float64]] = []
+    for r_in, r_out in annuli:
+        mask = (r >= r_in) & (r < r_out)
+        values_list.append(weights[mask])
+        phis_list.append(theta[mask])
+    coefficients = fourier_custom(values=values_list, phis=phis_list, max_mode=max(max_mode, 1))
+    orientation_coefficient = complex(coefficients[-1, 1])  # pyright: ignore[reportAny]
+    orientation = float(np.angle(orientation_coefficient)) if abs(orientation_coefficient) > 0 else float("nan")
+    return TTGCoeffs(
+        coefficients=coefficients[:-1, : max_mode + 1],
+        r_edges=r_edges,
+        orientation=orientation,
+    )
 
 
 def detect_ttg_phase_spiral(
-    coeffs: TTGCoeffs, *, slope_threshold: float = 0.667, slope_err_threshold: float = 0.2, scatter_threshold: float = 1.25
+    coeffs: TTGCoeffs, *, slope_threshold: float = 4.5, slope_err_threshold: float = 4.5, exclude: int = 2
 ) -> TTGResult:
     """Post-process the Fourier coefficients and use four criteria to detect phase spirals.
 
@@ -147,14 +294,12 @@ def detect_ttg_phase_spiral(
         The computed coefficients.
     slope_threshold : float
         The absolute slope threshold. The phase must vary linearly with phase radius with a slope at least this large.
-        Default is 0.667.
+        Default is 4.5.
     slope_err_threshold : float
-        The relative slope error threshold. The fitted slope must have a relative error no greater than the threshold.
-        Default is 0.2 (20%).
-    scatter_threshold : float
-        Strict upper limit on sqrt(SSR) = sqrt(sum((phase - fitted_phase)**2)), in radians.
-        Default is 1.25, equivalent to toy method 2's 1/sqrt(SSR) > 0.8.
-        This statistic is not divided by the number of radial bins.
+        Maximum standard error of the fitted linear slope, in radians per radial unit.
+        Default is 4.5.
+    exclude : int
+        Exclude the given number of bins on the inside and outside.
 
     Returns
     -------
@@ -163,56 +308,101 @@ def detect_ttg_phase_spiral(
 
     """
     r_centres = 0.5 * (coeffs.r_edges[:-1] + coeffs.r_edges[1:])
+    fit_mask = np.zeros_like(r_centres, np.bool_)
+    fit_mask[exclude:-exclude] = True
 
-    amps = np.abs(coeffs.coefficients) / np.abs(coeffs.coefficients[:, 0])[:, None]
-    phase = np.unwrap(np.angle(coeffs.coefficients[:, 1]))
+    coefficients = coeffs.coefficients
+    amps = np.abs(coefficients) / np.abs(coefficients[:, 0])[:, None]
+    phase = np.unwrap(np.angle(coefficients[:, 1]))
 
-    strength = np.median(amps[:, 1])
+    strength = np.nanmedian(amps[:, 1][fit_mask])
+    strength_m2 = float(np.nanmedian(amps[fit_mask, 2])) if amps.shape[1] > 2 else float("nan")
 
-    avg_amps = np.mean(amps, axis=0)
-    amp_criterion = all(avg_amps[1, None] > avg_amps[2:])
+    fit_amps = np.abs(coefficients)[fit_mask]
 
-    mask = amps[:, 1] > avg_amps[1]
-    slope_criterion: bool = False
-    slope_error_criterion: bool = False
-    scatter_criterion: bool = False
-    winding: Literal[-1, 1] = -1
-    slope = intercept = slope_stderr = slope_relative_error = scatter = float("nan")
-    predicted = np.full_like(r_centres, np.nan)
-    if np.count_nonzero(mask) > 2:
-        phase_fit = stats.linregress(r_centres[mask], phase[mask])
-        slope = float(phase_fit.slope)
-        intercept = float(phase_fit.intercept)
-        slope_stderr = float(phase_fit.stderr)
-        slope_relative_error = abs(slope_stderr / slope) if slope != 0.0 else float("inf")
-        predicted = slope * r_centres + intercept
-        scatter = float(np.sqrt(np.sum(np.square(phase[mask] - predicted[mask]))))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mode_ratios = fit_amps[:, 1, None] / fit_amps[:, 2:]
 
-        slope_criterion = abs(slope) >= slope_threshold
-        slope_error_criterion = slope_relative_error < slope_err_threshold
-        scatter_criterion = bool(scatter < scatter_threshold)
+    mean_mode_ratios = np.nanmean(mode_ratios, axis=0)
+    amp_criterion = bool(np.all(mean_mode_ratios >= 1.0))
 
-        winding = 1 if slope >= 0 else -1
+    # Slope criterion
+    fit_x = r_centres[fit_mask]
+    fit_y = np.unwrap(phase[fit_mask])
+    gradient_signs = np.sign(np.diff(fit_y))
+    monotonicity = bool(np.all(gradient_signs >= 0) or np.all(gradient_signs <= 0))
+
+    res = stats.linregress(fit_x, fit_y)
+
+    slope_criterion: bool = bool(np.abs(res.slope) >= slope_threshold)  # pyright: ignore[reportAny]
+    slope_error_criterion: bool = bool(res.stderr <= slope_err_threshold)
+    winding = 1 if res.slope >= 0 else -1
 
     return TTGResult(
         strength=strength,
-        phase=phase,
-        r_edges=coeffs.r_edges,
-        is_spiral=amp_criterion and slope_criterion and scatter_criterion and slope_error_criterion,
-        amp_criterion=amp_criterion,
-        slope_criterion=slope_criterion,
-        scatter_criterion=scatter_criterion,
-        slope_error_criterion=slope_error_criterion,
-        winding=winding,
+        strength_m2=strength_m2,
+        orientation=coeffs.orientation,
         amps=amps,
-        fit_mask=mask,
-        slope=slope,
-        intercept=intercept,
-        slope_stderr=slope_stderr,
-        slope_relative_error=slope_relative_error,
-        scatter=scatter,
-        predicted=predicted,
+        phase=phase,
+        winding=winding,
+        # Binning
+        r_edges=coeffs.r_edges,
+        fit_mask=fit_mask,
+        # Thresholds
         slope_threshold=slope_threshold,
         slope_err_threshold=slope_err_threshold,
-        scatter_threshold=scatter_threshold,
+        # Fit
+        slope=res.slope,
+        slope_err=res.stderr,
+        intercept=res.intercept,
+        intercept_err=res.intercept_stderr,
+        # Criteria
+        is_spiral=amp_criterion and slope_criterion and slope_error_criterion and monotonicity,
+        amp_criterion=amp_criterion,
+        slope_criterion=slope_criterion,
+        slope_error_criterion=slope_error_criterion,
+        monotonicity_criterion=monotonicity,
     )
+
+
+def azimuthal_bin(
+    matrix: onp.Array2D[np.float64],
+    r_mesh: onp.Array2D[np.float64],
+    phi_mesh: onp.Array2D[np.float64],
+    r_in: float,
+    r_out: float,
+) -> tuple[onp.Array1D[np.float64], onp.Array1D[np.float64]]:
+    """Return row/column indices, total, and values in [r_in, r_out).
+
+    Radii are measured in pixels about the same centre used by the Fourier
+    analysis below. Adjacent annuli do not share pixels.
+    """
+    mask: onp.Array2D[np.bool_] = np.logical_and(r_mesh >= r_in, r_mesh < r_out)
+    values: onp.Array1D[np.float64] = matrix[mask]
+    return values, phi_mesh[mask]
+
+
+def fourier_custom(
+    values: list[onp.Array1D[np.float64]],
+    phis: list[onp.Array1D[np.float64]],
+    max_mode: int = 6,
+) -> onp.Array2D[np.complex128]:
+    """Compute summed complex Fourier coefficients for each annulus.
+
+    ``indices`` contains (row, column) arrays and ``mat_centre`` is (x, y).
+    The positive exponential convention gives an increasing m=1 phase for
+    the default toy spiral cos(r - theta). Results have shape
+    (number_of_annuli, max_mode + 1); empty annuli remain NaN.
+    """
+    coefficients = np.full((len(values), max_mode + 1), np.nan, dtype=np.complex128)
+    modes = np.arange(max_mode + 1)
+
+    for bin_index, (bin_values, bin_phis) in enumerate(zip(values, phis, strict=True)):
+        valid = np.isfinite(bin_values) & np.isfinite(bin_phis)
+        if not np.any(valid):
+            continue
+        coefficients[bin_index, :] = np.sum(
+            bin_values[valid] * np.exp(1j * modes[:, None] * bin_phis[valid]),
+            axis=1,
+        )
+    return coefficients

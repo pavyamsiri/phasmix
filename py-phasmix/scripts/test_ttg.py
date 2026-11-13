@@ -2,137 +2,179 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from matplotlib import colors as mplcolors
 from matplotlib import pyplot as plt
-from phasmock.component import AlinderComponent, GaussianComponent
-from phasmock.mock import MockModel
+from phasmock.component import AlinderComponent
+from phasmock.recipe import MockRecipe
+from rich import print as rich_print
+from scipy import ndimage
 
-from phasmix.fit.ttg_fourier import compute_ttg_coefficients, detect_ttg_phase_spiral
+from phasmix.fit.ttg_fourier import compute_ttg_coefficients, compute_ttg_coefficients_grid, detect_ttg_phase_spiral
 
 if TYPE_CHECKING:
     from optype import numpy as onp
 
 
-@dataclass(frozen=True)
-class MockData:
-    """Count map, background, and coordinate grids for the benchmark."""
+def estimate_scale_factor(
+    z: onp.Array1D[np.float64],
+    vz: onp.Array1D[np.float64],
+) -> float:
+    """Estimate the elliptical phase-space scale factor from particles.
 
-    x_edges: onp.Array1D[np.float64]
-    y_edges: onp.Array1D[np.float64]
-    x_mesh: onp.Array2D[np.float64]
-    y_mesh: onp.Array2D[np.float64]
-    x_centres: onp.Array1D[np.float64]
-    y_centres: onp.Array1D[np.float64]
-    x_samples: onp.Array1D[np.float64]
-    y_samples: onp.Array1D[np.float64]
+    Parameters
+    ----------
+    z : Array1D[f64]
+        The z coordinate.
+    vz : Array1D[f64]
+        The Vz velocity.
+
+    Returns
+    -------
+    s : float
+        The estimated scale factor.
+
+    """
+    return float(np.std(vz) / np.std(z))
 
 
-def _generate_mock() -> MockData:
-    signal1 = AlinderComponent(
-        alpha=0.5,
-        b=0.3,
-        c=0.0,
-        theta0=0.0,
-        scale_factor=1.00,
-        rho=2.0,
-        winding=-1,
-    )
-    background_comp = GaussianComponent(x_scale=1, y_scale=1.0, amplitude=1, variance=4.0)
+def generate_mock() -> tuple[
+    onp.Array2D[np.float64],
+    onp.Array2D[np.float64],
+    onp.Array2D[np.float64],
+    onp.Array2D[np.float64],
+    onp.Array2D[np.float64],
+    onp.Array1D[np.float64],
+    onp.Array1D[np.float64],
+    float,
+    float,
+]:
+    """Generate the smoke mock and its elliptical phase-space coordinates.
 
-    mock_model = MockModel(
-        (signal1,),
-        (background_comp,),
-    )
+    Returns
+    -------
+    tuple
+        Count map, radius mesh, angle mesh, z mesh, velocity mesh,
+        particle z coordinates, particle velocities, outer radial limit,
+        and estimated velocity-to-position scale factor. Radii are in kpc,
+        velocities in km/s, and angles in radians.
 
-    num_x_bins = 100
-    num_y_bins = 100
-    x_edges = np.linspace(-4.0, 4.0, num_x_bins + 1)
-    y_edges = np.linspace(-4.0, 4.0, num_y_bins + 1)
+    """
+    path = Path(__file__).parent / "../recipes/smoke_recipe.yaml"
+    smoke_recipe = MockRecipe.from_yaml(path)
+    particles = smoke_recipe.generate()
+    z_samples = particles.x
+    vz_samples = particles.y
 
-    x_centres = 0.5 * (x_edges[:-1] + x_edges[1:])
-    y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
-    x_mesh, y_mesh = np.meshgrid(x_centres, y_centres)
+    scale_factor = estimate_scale_factor(z_samples, vz_samples)
+    r_mesh = np.hypot(smoke_recipe.x_mesh, smoke_recipe.y_mesh / scale_factor)
+    phi_mesh = np.arctan2(smoke_recipe.y_mesh / scale_factor, smoke_recipe.x_mesh)
 
-    num_particles: int = 100_000
-    particles = mock_model.mock_particles(num_particles, x_edges, y_edges)
-    x_samples = particles.x
-    y_samples = particles.y
+    density, _, _ = np.histogram2d(vz_samples, z_samples, bins=(smoke_recipe.y_edges, smoke_recipe.x_edges))
+    smooth_density = ndimage.gaussian_filter(density, sigma=2)
+    smooth_bg = ndimage.gaussian_filter(density, sigma=4)
+    contrast = np.zeros_like(density)
+    _ = np.divide(smooth_density, smooth_bg, where=smooth_bg > 0, out=contrast)
+    contrast -= 1.0
+    contrast = density
 
-    return MockData(
-        x_edges=x_edges,
-        x_centres=x_centres,
-        x_mesh=x_mesh,
-        y_edges=y_edges,
-        y_centres=y_centres,
-        y_mesh=y_mesh,
-        x_samples=x_samples,
-        y_samples=y_samples,
-    )
+    # Find the radius which encompasses 95% of stars
+
+    upper: float = 1e-5
+    max_trials: int = 100
+    fraction: float = 0.0
+    for _ in range(max_trials):
+        mask = r_mesh <= upper
+        fraction = np.sum(density[mask]) / np.sum(density)
+        if fraction >= 0.99:
+            break
+        upper *= 2.0
+
+    return (contrast, r_mesh, phi_mesh, smoke_recipe.x_mesh, smoke_recipe.y_mesh, z_samples, vz_samples, upper, scale_factor)
 
 
 def main() -> None:
+    """Compare measured and Alinder orientations and plot Fourier diagnostics."""
     true_alpha: float = 0.5
     num_r_bins: int = 20
 
-    data = _generate_mock()
-    density, _, _ = np.histogram2d(data.x_samples, data.y_samples, bins=(data.x_edges, data.y_edges))
+    ps_map, r_mesh, phi_mesh, z_mesh, vz_mesh, z_samples, vz_samples, rmax, scale_factor = generate_mock()
+    density = ps_map
+    x_mesh = z_mesh
+    y_mesh = vz_mesh
 
-    r = np.hypot(data.x_samples, data.y_samples)
+    use_particles: bool = True
+    if not use_particles:
+        coeffs = compute_ttg_coefficients_grid(ps_map, r_mesh, phi_mesh, r_extent=(0.0, rmax), max_mode=6, num_bins=num_r_bins)
+    else:
+        r_samples = np.hypot(z_samples, vz_samples / scale_factor)
+        thetaz_samples = np.arctan2(vz_samples / scale_factor, z_samples)
+        coeffs = compute_ttg_coefficients(r_samples, thetaz_samples, r_edges=np.linspace(0, rmax, num_r_bins + 1), max_mode=6)
 
-    r_edges = np.linspace(0.0, 4.0, num_r_bins + 1)
-    r_centres = 0.5 * (r_edges[:-1] + r_edges[1:])
-
-    theta = np.arctan2(data.y_samples, data.x_samples)
-    coeffs = compute_ttg_coefficients(r, theta, r_edges=r_edges, max_mode=6)
+    r_centres = 0.5 * (coeffs.r_edges[:-1] + coeffs.r_edges[1:])
     res = detect_ttg_phase_spiral(coeffs)
+    rich_print(f"m=1 strength = {res.strength:.4f}, m=2 strength = {res.strength_m2:.4f}")
+    rich_print(f"orientation = {np.rad2deg(res.orientation)} deg")
+    recipe = MockRecipe.from_yaml(Path(__file__).parent / "../recipes/smoke_recipe.yaml")
+    for component in recipe.model.signal:
+        if isinstance(component, AlinderComponent):
+            model_phase = component.winding * component.model_phase(r_test=0.5)
+            model_orientation = (model_phase + np.pi) % (2 * np.pi) - np.pi
+            phase_difference = (res.orientation - model_orientation + np.pi) % (2 * np.pi) - np.pi
+            rich_print(f"Alinder orientation at 500 pc = {np.rad2deg(model_orientation):.2f} deg")
+            rich_print(f"Measured - model orientation = {np.rad2deg(phase_difference):.2f} deg")
 
+    recons = coeffs.reconstruct(r_mesh, phi_mesh)
     amps = res.amps
     phase = res.phase
 
     points_x = r_centres * np.cos(phase)
-    points_y = r_centres * np.sin(phase)
+    points_y = scale_factor * r_centres * np.sin(phase)
 
     amp_criterion = res.amp_criterion
     slope_criterion = res.slope_criterion
-    scatter_criterion = res.scatter_criterion
 
     criteria_display = {False: "FAIL", True: "PASS"}
 
     title_text: list[str] = [
-        rf"$A = {res.strength:.3f}, \,\, \nabla(\phi) = {res.slope:.2f}, \,\, \sqrt{{\mathrm{{SSR}}}} = {res.scatter:.2f}$",
-        rf"$|\nabla\phi| \geq {res.slope_threshold:.3f}, \,\, \sigma_s/|s| < {res.slope_err_threshold:.2f}, \,\, "
-        rf"\sqrt{{\mathrm{{SSR}}}} < {res.scatter_threshold:.2f}$",
+        rf"$A_1/A_0 = {res.strength:.3f}, \,\, A_2/A_0 = {res.strength_m2:.3f}, \,\, \nabla(\phi) = {res.slope:.2f}$",
+        rf"$|\nabla\phi| \geq {res.slope_threshold:.3f}, \,\, \sigma_s/|s| < {res.slope_err_threshold:.2f}$"
         f"Amp: {criteria_display[amp_criterion]}, Slope: {criteria_display[slope_criterion]}, "
-        f"Scatter: {criteria_display[scatter_criterion]}",
-        f"Slope error: {res.slope_relative_error:.1%} ({criteria_display[res.slope_error_criterion]})",
+        f"Slope error: {res.slope_err:.2f} ({criteria_display[res.slope_error_criterion]})",
         rf"$\alpha = {true_alpha:.2f}, \,\, \tilde{{\alpha}} = 2 A = {(2 * res.strength):.3f}$",
     ]
 
+    norm = mplcolors.LogNorm()
     fig = plt.figure()
     _ = fig.suptitle("\n".join(title_text))
-    axes = fig.add_subplot(131)
-    amp_axes = fig.add_subplot(132)
-    phase_axes = fig.add_subplot(133)
+    axes = fig.add_subplot(221)
+    recons_axes = fig.add_subplot(223)
+    amp_axes = fig.add_subplot(222)
+    phase_axes = fig.add_subplot(224)
 
-    _ = axes.pcolormesh(data.x_mesh, data.y_mesh, density.T)
-    _ = axes.scatter(points_x, points_y, marker="x", c="white")
+    _ = axes.pcolormesh(x_mesh, y_mesh, density, norm=norm)
+    _ = axes.plot(points_x, points_y, marker="x", c="black")
+
+    _ = recons_axes.pcolormesh(x_mesh, y_mesh, recons, norm=norm)
+    _ = recons_axes.plot(points_x, points_y, marker="x", c="black")
 
     for m in range(1, amps.shape[1]):
-        _ = amp_axes.plot(r_centres, amps[:, m], label=f"m={m}: $A = {np.median(amps[:, m]):.3f}$")
+        _ = amp_axes.plot(r_centres[res.fit_mask], amps[:, m][res.fit_mask], label=f"m={m}: $A = {np.median(amps[:, m]):.3f}$")
+        _ = amp_axes.scatter(r_centres[~res.fit_mask], amps[:, m][~res.fit_mask], marker="x")
     _ = amp_axes.legend()
 
     _ = phase_axes.plot(
         r_centres,
-        res.predicted,
+        res.slope * r_centres + res.intercept,
         label=rf"Linear fit: $\phi = {res.slope:.2f}r + {res.intercept:.2f}$",
         ls="--",
-        color="tab:blue",
+        color="black",
     )
-    _ = phase_axes.scatter(r_centres[res.fit_mask], phase[res.fit_mask], label="Used in fit", color="tab:orange")
-    _ = phase_axes.scatter(r_centres[~res.fit_mask], phase[~res.fit_mask], label="Excluded from fit", color="grey", marker="x")
+    _ = phase_axes.scatter(r_centres[res.fit_mask], phase[res.fit_mask], color="tab:orange")
+    _ = phase_axes.scatter(r_centres[~res.fit_mask], phase[~res.fit_mask], marker="x", color="tab:blue")
     _ = phase_axes.legend()
 
     plt.show()
