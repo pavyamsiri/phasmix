@@ -31,7 +31,7 @@ from phasmix._rust_backend import RustFitBackend
 from phasmix.background_estimators import BackgroundEstimator, estimate_kde_background_vz_mirrored
 from phasmix.bounds import Fixed, Interval, ParameterBounds
 
-from . import ttg_fourier
+from . import tavangar_bfe, ttg_fourier
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -67,6 +67,7 @@ __all__: list[str] = [
     "SmoothConfig",
     "create_gaussian_smoother",
     "create_sigmoid_mask",
+    "tavangar_bfe",
     "ttg_fourier",
 ]
 
