@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from optype import numpy as onp
 
 FORMAT: Final[str] = "%(message)s"
+GYR_PER_KPC_KMS: Final[float] = 0.9777922217
 log: Final[logging.Logger] = logging.getLogger(__name__)
 
 
@@ -60,6 +61,9 @@ def main() -> None:
     density, _, _ = np.histogram2d(thetaz, omegaz, bins=(thetaz_bins, omegaz_bins))
 
     result = compute_frankel_parameters(omegaz, thetaz)
+    log.info("Amplitude = %f", result.amplitude)
+    log.info("thetaz0 = %f deg", np.rad2deg(result.thetaz0))
+    log.info("t = %f Gyr", result.t * GYR_PER_KPC_KMS)
 
     sm = cm.ScalarMappable(cmap="viridis", norm=mplcolors.Normalize())
     fig = plt.figure()
