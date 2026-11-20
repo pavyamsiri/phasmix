@@ -122,13 +122,14 @@ def main() -> None:
     log.info("True phase = %f deg", true_phase_deg)
     log.info("True scale = %f km/s/kpc", true_scale)
 
+    num_workers: int = mp.cpu_count() // 2
+
     rng = np.random.default_rng(seed=8734)
     min_u64 = np.iinfo(np.uint64).min
     max_u64 = np.iinfo(np.uint64).max
-    num_seeds: int = 3
+    num_seeds: int = 8 * num_workers
     seeds: onp.Array1D[np.uint64] = rng.integers(low=min_u64, high=max_u64, size=num_seeds, dtype=np.uint64)
 
-    num_workers: int = mp.cpu_count() // 2
     log.info("Number of workers: %d", num_workers)
     batches: Sequence[Sequence[FitInput]] = split_list([generate_mock(model, seed) for seed in seeds], num_workers)
 
@@ -175,14 +176,16 @@ def main() -> None:
     phase = wrap_angle(np.rad2deg(np.array([result.result.final_model.components[0].model_phase() for result in results])))
     scale = np.array([result.result.final_model.components[0].scale_factor for result in results])
 
+    alpha_std = np.std(alpha)
+    phase_std = np.std(phase)
     scale_std = np.std(scale)
 
-    alpha_lim = (0.0, 1.0)
-    phase_lim = (-180, 180)
-    scale_lim = (true_scale - 5 * scale_std, true_scale + 5 * scale_std)
-    alpha_counts, alpha_edges = np.histogram(alpha, range=alpha_lim)
-    phase_counts, phase_edges = np.histogram(phase, range=phase_lim)
-    scale_counts, scale_edges = np.histogram(scale, range=scale_lim)
+    alpha_lim = (-10 * alpha_std, 10 * alpha_std)
+    phase_lim = (-10 * phase_std, 10 * phase_std)
+    scale_lim = (-10 * scale_std, 10 * scale_std)
+    alpha_counts, alpha_edges = np.histogram(alpha - true_alpha, range=alpha_lim, density=True)
+    phase_counts, phase_edges = np.histogram(phase - true_phase_deg, range=phase_lim, density=True)
+    scale_counts, scale_edges = np.histogram(scale - true_scale, range=scale_lim, density=True)
 
     alpha_centres = 0.5 * (alpha_edges[:-1] + alpha_edges[1:])
     phase_centres = 0.5 * (phase_edges[:-1] + phase_edges[1:])
@@ -201,26 +204,21 @@ def main() -> None:
     phase_axes.set_title(r"$\theta_{0,\mathrm{model}}$")
     scale_axes.set_title(r"$S$")
 
-    alpha_axes.set_xlabel(r"$\alpha$")
-    phase_axes.set_xlabel(r"$\theta_{0,\mathrm{model}}$")
-    scale_axes.set_xlabel(r"$S$")
+    alpha_axes.set_xlabel(r"$\hat{\alpha} - \alpha$")
+    phase_axes.set_xlabel(r"$\hat{\theta}_{0,\mathrm{model}} - \theta_{0,\mathrm{model}}$")
+    scale_axes.set_xlabel(r"$\hat{S} - S$")
 
     alpha_axes.set_xlim(*alpha_lim)
     phase_axes.set_xlim(*phase_lim)
     scale_axes.set_xlim(*scale_lim)
 
-    dalpha = 0.25
-    dphase = 90.0
-    alpha_axes.set_xticks(np.arange(alpha_lim[0], alpha_lim[1] + dalpha, dalpha))
-    phase_axes.set_xticks(np.arange(phase_lim[0], phase_lim[1] + dphase, dphase))
-
     alpha_axes.bar(alpha_centres, alpha_counts, width=alpha_width, edgecolor="black", alpha=0.3)
     phase_axes.bar(phase_centres, phase_counts, width=phase_width, edgecolor="black", alpha=0.3)
     scale_axes.bar(scale_centres, scale_counts, width=scale_width, edgecolor="black", alpha=0.3)
 
-    alpha_axes.axvline(true_alpha, color="tab:orange", ls="--", label="True value")
-    phase_axes.axvline(true_phase_deg, color="tab:orange", ls="--", label="True value")
-    scale_axes.axvline(true_scale, color="tab:orange", ls="--", label="True value")
+    alpha_axes.axvline(0.0, color="tab:orange", ls="--", label="True value")
+    phase_axes.axvline(0.0, color="tab:orange", ls="--", label="True value")
+    scale_axes.axvline(0.0, color="tab:orange", ls="--", label="True value")
 
     fig.tight_layout()
     fig.savefig("out.png")
