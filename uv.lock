@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 
 [manifest]
@@ -484,7 +484,7 @@ dev = [
 [[package]]
 name = "phasmix-mock"
 version = "0.1.0"
-source = { git = "https://github.com/pavyamsiri/phasmix-mock.git#a1233644b721726d7eec6c9107a459c157c754a8" }
+source = { git = "https://github.com/pavyamsiri/phasmix-mock.git#6c1979c5100133f872f1558587bfa10f7417c636" }
 dependencies = [
     { name = "numpy" },
     { name = "optype", extra = ["numpy"] },

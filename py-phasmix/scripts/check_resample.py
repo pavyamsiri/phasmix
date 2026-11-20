@@ -109,7 +109,7 @@ def _generate_mock() -> MockData:
 
     num_particles: int = 1_000
     log.info("Sampling %d particles...", num_particles)
-    particles = mock_model.mock_particles(num_particles, x_edges, y_edges, seed=1)
+    particles = mock_model.mock_particles(num_particles, x_edges, y_edges, rng=1)
     z_samples = particles.x
     vz_samples = particles.y
 
