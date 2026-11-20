@@ -1,22 +1,21 @@
 from __future__ import annotations
 
+import datetime
 import logging
-from dataclasses import dataclass
+import multiprocessing as mp
+import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
-from matplotlib import colors as mplcolors
 from matplotlib import pyplot as plt
-from matplotlib import widgets
 from phasmock.component import AlinderComponent, GaussianComponent
 from phasmock.mock import MockModel
 from rich.console import Console
 from rich.logging import RichHandler
 
-from phasmix import fit
-from phasmix._likelihood_utils import ln_likelihood
-from phasmix.background_estimators import estimate_kde_background_vz_mirrored
-from phasmix.fit import FitFailure, FitSuccess, PSpiralFitter
+from phasmix.background_estimators import estimate_gaussian_smooth_background_axisymmetric
+from phasmix.fit import FitInput, FitOutcome, FitSuccess, PSpiralFitter
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -54,37 +53,12 @@ def setup_logging() -> Iterable[logging.Handler]:
     return handlers
 
 
-@dataclass
-class MockData:
-    density: onp.Array2D[np.float64]
-    background: onp.Array2D[np.float64]
-    mask: onp.Array2D[np.float64]
-    x_edges: onp.Array1D[np.float64]
-    y_edges: onp.Array1D[np.float64]
-    x_mesh: onp.Array2D[np.float64]
-    y_mesh: onp.Array2D[np.float64]
-    x_centres: onp.Array1D[np.float64]
-    y_centres: onp.Array1D[np.float64]
-    num_stars: int
-    z: onp.Array1D[np.float64]
-    vz: onp.Array1D[np.float64]
-
-
-def _generate_mock() -> MockData:
+def create_model() -> tuple[AlinderComponent, MockModel]:
     signal1 = AlinderComponent(
         alpha=0.5,
         b=0.05,
         c=0.002,
         theta0=-np.pi / 2,
-        scale_factor=40.00,
-        rho=0.09,
-        winding=1,
-    )
-    signal2 = AlinderComponent(
-        alpha=0.5,
-        b=0.05,
-        c=0.002,
-        theta0=np.pi / 2,
         scale_factor=40.00,
         rho=0.09,
         winding=1,
@@ -95,119 +69,161 @@ def _generate_mock() -> MockData:
         (signal1,),
         (background_comp,),
     )
+    return (signal1, mock_model)
 
-    log.info("%d-arm model", len(mock_model._signal))
 
-    num_x_bins = 100
-    num_y_bins = 100
-    x_edges = np.linspace(-1.2, 1.2, num_x_bins + 1)
+def generate_mock(mock_model: MockModel, seed: np.uint64) -> FitInput:
+    num_x_bins: int = 100
+    num_y_bins: int = 120
+    x_edges = np.linspace(-1.0, 1.0, num_x_bins + 1)
     y_edges = np.linspace(-60.0, 60.0, num_y_bins + 1)
 
     x_centres = 0.5 * (x_edges[:-1] + x_edges[1:])
     y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
     x_mesh, y_mesh = np.meshgrid(x_centres, y_centres)
 
-    num_particles: int = 1_000
-    log.info("Sampling %d particles...", num_particles)
-    particles = mock_model.mock_particles(num_particles, x_edges, y_edges, rng=1)
+    num_particles: int = 100_000
+    particles = mock_model.mock_particles(num_particles, x_edges, y_edges, rng=seed)
     z_samples = particles.x
     vz_samples = particles.y
 
     density, _, _ = np.histogram2d(z_samples, vz_samples, bins=(x_edges, y_edges))
     density = density.T
 
-    log.info("Generating initial background estimate via KDE...")
-    initial_background = estimate_kde_background_vz_mirrored(z_samples, vz_samples, x_edges, y_edges)
+    background = estimate_gaussian_smooth_background_axisymmetric(z_samples, vz_samples, x_edges, y_edges)
 
-    mask = fit.create_sigmoid_mask(1.0, 40.0)(x_mesh, y_mesh)
-
-    log.info("ln likelihood (null) = %f", ln_likelihood(density, initial_background, mask))
-    return MockData(
+    fit_gen = np.random.default_rng(seed=seed)
+    return FitInput(
         density=density,
-        background=initial_background,
-        mask=mask,
-        x_edges=x_edges,
-        x_centres=x_centres,
-        x_mesh=x_mesh,
-        y_edges=y_edges,
-        y_centres=y_centres,
-        y_mesh=y_mesh,
-        num_stars=num_particles,
-        z=z_samples,
-        vz=vz_samples,
+        background=background,
+        z_mesh=x_mesh,
+        vz_mesh=y_mesh,
+        winding=1,
+        num_components=1,
+        improve_background=True,
+        rng=fit_gen,
     )
+
+
+def split_list[T](items: Sequence[T], n: int) -> Sequence[Sequence[T]]:
+    return [items[i : i + n] for i in range(0, len(items), n)]
+
+
+def wrap_angle(angle_deg: onp.Array1D[np.float64]) -> onp.Array1D[np.float64]:
+    return (angle_deg + 180) % 360 - 180
 
 
 def main() -> None:
-    mock_data = _generate_mock()
+    signal1, model = create_model()
+    true_alpha = signal1.alpha
+    true_phase_deg = wrap_angle(np.rad2deg(signal1.model_phase()))
+    true_scale = signal1.scale_factor
+    log.info("True alpha = %f", true_alpha)
+    log.info("True phase = %f deg", true_phase_deg)
+    log.info("True scale = %f km/s/kpc", true_scale)
 
-    data = mock_data.density
+    rng = np.random.default_rng(seed=8734)
+    min_u64 = np.iinfo(np.uint64).min
+    max_u64 = np.iinfo(np.uint64).max
+    num_seeds: int = 3
+    seeds: onp.Array1D[np.uint64] = rng.integers(low=min_u64, high=max_u64, size=num_seeds, dtype=np.uint64)
 
-    fitter = PSpiralFitter(backend="rust", max_iterations=10)
+    num_workers: int = mp.cpu_count() // 2
+    log.info("Number of workers: %d", num_workers)
+    batches: Sequence[Sequence[FitInput]] = split_list([generate_mock(model, seed) for seed in seeds], num_workers)
 
-    res = fitter.fit_spiral_with_background(
-        mock_data.density,
-        mock_data.background,
-        mock_data.x_mesh,
-        mock_data.y_mesh,
-        winding=1,
-        num_components=1,
-    )
-    if isinstance(res, FitFailure):
-        log.error("Fit failed: %s", res.reason)
-        return
-    log.debug("Initial fit = %s", res.result.final_model)
-    prediction = res.result.final_model.prediction()
+    fitter = PSpiralFitter(backend="rust", optimizer="differential_evolution")
 
-    total = int(np.sum(data))
-    probabilities = prediction.ravel() / np.sum(prediction)
+    local_tz = datetime.datetime.now().astimezone().tzinfo
 
-    rng = np.random.default_rng()
-    counts = rng.multinomial(total, probabilities).reshape(data.shape).astype(np.float64)
-    norm = mplcolors.Normalize(vmin=0, vmax=np.nanmax(mock_data.density))
+    start_time = time.perf_counter()
+    num_processed: int = 0
+    num_remaining: int = num_seeds
+
+    outcomes: list[FitOutcome] = []
+    for idx, batch in enumerate(batches):
+        log.info("Batch %d/%d", idx + 1, len(batches))
+
+        current_outcomes = fitter.fit_batch(batch, progress=True, workers=num_workers)
+        num_processed += len(current_outcomes)
+        outcomes.extend(current_outcomes)
+
+        elapsed = time.perf_counter() - start_time
+        remaining = num_remaining - num_processed
+
+        seconds_per_cell = elapsed / num_processed
+        eta_seconds = remaining * seconds_per_cell
+        completion_time = datetime.datetime.now(tz=local_tz) + datetime.timedelta(seconds=eta_seconds)
+
+        log.info(
+            "Progress: %d/%d | Elapsed: %s | Remaining: %s | ETA: %s",
+            num_processed,
+            num_remaining,
+            str(datetime.timedelta(seconds=round(elapsed))),
+            str(datetime.timedelta(seconds=round(eta_seconds))),
+            completion_time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    results: list[FitSuccess] = []
+    for outcome in outcomes:
+        if not isinstance(outcome, FitSuccess):
+            msg = f"Fit failed: {outcome}"
+            raise TypeError(msg)
+        results.append(outcome)
+
+    alpha = np.array([result.result.final_model.components[0].alpha for result in results])
+    phase = wrap_angle(np.rad2deg(np.array([result.result.final_model.components[0].model_phase() for result in results])))
+    scale = np.array([result.result.final_model.components[0].scale_factor for result in results])
+
+    scale_std = np.std(scale)
+
+    alpha_lim = (0.0, 1.0)
+    phase_lim = (-180, 180)
+    scale_lim = (true_scale - 5 * scale_std, true_scale + 5 * scale_std)
+    alpha_counts, alpha_edges = np.histogram(alpha, range=alpha_lim)
+    phase_counts, phase_edges = np.histogram(phase, range=phase_lim)
+    scale_counts, scale_edges = np.histogram(scale, range=scale_lim)
+
+    alpha_centres = 0.5 * (alpha_edges[:-1] + alpha_edges[1:])
+    phase_centres = 0.5 * (phase_edges[:-1] + phase_edges[1:])
+    scale_centres = 0.5 * (scale_edges[:-1] + scale_edges[1:])
+
+    alpha_width = alpha_edges[1] - alpha_edges[0]
+    phase_width = phase_edges[1] - phase_edges[0]
+    scale_width = scale_edges[1] - scale_edges[0]
 
     fig = plt.figure()
-    gs = fig.add_gridspec(nrows=2, ncols=10, height_ratios=(1.0, 0.1))
-    true_axes = fig.add_subplot(gs[0, :5])
-    resampled_axes = fig.add_subplot(gs[0, 5:])
-    button_axes = fig.add_subplot(gs[1, 0])
+    alpha_axes = fig.add_subplot(131)
+    phase_axes = fig.add_subplot(132)
+    scale_axes = fig.add_subplot(133)
 
-    true_axes.pcolormesh(mock_data.x_mesh, mock_data.y_mesh, mock_data.density, norm=norm)
-    resample_img = resampled_axes.pcolormesh(mock_data.x_mesh, mock_data.y_mesh, counts, norm=norm)
+    alpha_axes.set_title(r"$\alpha$")
+    phase_axes.set_title(r"$\theta_{0,\mathrm{model}}$")
+    scale_axes.set_title(r"$S$")
 
-    btn = widgets.Button(button_axes, label="Regenerate")
+    alpha_axes.set_xlabel(r"$\alpha$")
+    phase_axes.set_xlabel(r"$\theta_{0,\mathrm{model}}$")
+    scale_axes.set_xlabel(r"$S$")
 
-    # def _update(_val: object) -> None:
-    #     nonlocal resample_img, total, probabilities, data
-    #     new_counts = rng.multinomial(total, probabilities).reshape(data.shape).astype(np.float64)
-    #     resample_img.set_array(new_counts)
-    #     fig.canvas.draw()
+    alpha_axes.set_xlim(*alpha_lim)
+    phase_axes.set_xlim(*phase_lim)
+    scale_axes.set_xlim(*scale_lim)
 
-    def _update(_val: object) -> None:
-        nonlocal resample_img, mock_data
+    dalpha = 0.25
+    dphase = 90.0
+    alpha_axes.set_xticks(np.arange(alpha_lim[0], alpha_lim[1] + dalpha, dalpha))
+    phase_axes.set_xticks(np.arange(phase_lim[0], phase_lim[1] + dphase, dphase))
 
-        indices = rng.integers(mock_data.num_stars, size=mock_data.num_stars)
-        z, vz = mock_data.z[indices], mock_data.vz[indices]
-        new_counts, _, _ = np.histogram2d(z, vz, bins=(mock_data.x_edges, mock_data.y_edges))
-        resample_img.set_array(new_counts.T)
-        fig.canvas.draw()
+    alpha_axes.bar(alpha_centres, alpha_counts, width=alpha_width, edgecolor="black", alpha=0.3)
+    phase_axes.bar(phase_centres, phase_counts, width=phase_width, edgecolor="black", alpha=0.3)
+    scale_axes.bar(scale_centres, scale_counts, width=scale_width, edgecolor="black", alpha=0.3)
 
-        res = fitter.fit_spiral_with_background(
-            new_counts,
-            mock_data.background,
-            mock_data.x_mesh,
-            mock_data.y_mesh,
-            winding=1,
-            num_components=1,
-        )
-        if isinstance(res, FitSuccess):
-            log.debug("Resample fit = %s", res.result.final_model)
-        else:
-            log.debug("Res = %s", res)
+    alpha_axes.axvline(true_alpha, color="tab:orange", ls="--", label="True value")
+    phase_axes.axvline(true_phase_deg, color="tab:orange", ls="--", label="True value")
+    scale_axes.axvline(true_scale, color="tab:orange", ls="--", label="True value")
 
-    btn.on_clicked(_update)
-
-    plt.show(block=True)
+    fig.tight_layout()
+    fig.savefig("out.png")
     plt.close()
 
 
