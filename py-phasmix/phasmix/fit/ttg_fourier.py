@@ -309,7 +309,10 @@ def detect_ttg_phase_spiral(
     """
     r_centres = 0.5 * (coeffs.r_edges[:-1] + coeffs.r_edges[1:])
     fit_mask = np.zeros_like(r_centres, np.bool_)
-    fit_mask[exclude:-exclude] = True
+    if exclude > 0:
+        fit_mask[exclude:-exclude] = True
+    else:
+        fit_mask[:] = True
 
     coefficients = coeffs.coefficients
     amps = np.abs(coefficients) / np.abs(coefficients[:, 0])[:, None]

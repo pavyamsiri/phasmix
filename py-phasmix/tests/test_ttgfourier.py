@@ -8,7 +8,7 @@ import numpy as np
 from hypothesis import given
 from hypothesis import strategies as st
 
-from phasmix.fit.ttg_fourier import compute_ttg_coeffs, compute_ttg_coeffs_grid
+from phasmix.fit.ttg_fourier import TtgCoeffs, compute_ttg_coeffs, compute_ttg_coeffs_grid, detect_ttg_phase_spiral
 
 if TYPE_CHECKING:
     from typing import Final
@@ -70,3 +70,30 @@ def test_reconstruction(harmonic: int, shift: float, base: int) -> None:
     )
     reconstructed = np.rint(coeffs.reconstruct(r_mesh, phi_mesh))
     np.testing.assert_allclose(counts, reconstructed, rtol=1e-12, atol=1e-12)
+
+
+@given(
+    slope=st.floats(4.5 + 1e-3, 10.0),
+    intercept=st.floats(-1e3, 1e3),
+    exclude=st.integers(0, 2),
+)
+def test_detection_coeffs_direct(slope: float, intercept: float, exclude: int) -> None:
+    """Test TTG phase spiral detection criteria for guaranteed valid coefficients."""
+    num_r_bins: int = 20
+    r_edges = np.linspace(0, 5.1, num_r_bins + 1)
+    r_centres = 0.5 * (r_edges[:-1] + r_edges[1:])
+    num_modes: int = max_mode + 1
+    coefficients = np.zeros((num_r_bins, num_modes), dtype=np.complex128)
+    c0 = 12.0
+    c1_abs = 23.2
+    c2_abs = 0.3
+    phase = slope * r_centres + intercept
+    coefficients[:, 0] = c0
+    coefficients[:, 1] = c1_abs * np.exp(1j * phase)
+    coefficients[:, 2] = c2_abs
+    coeffs = TtgCoeffs(coefficients=coefficients, r_edges=r_edges, orientation=0.0)
+    result = detect_ttg_phase_spiral(coeffs, slope_threshold=4.5, slope_err_threshold=4.5, exclude=exclude)
+    assert result.amp_criterion
+    assert result.slope_criterion
+    assert result.slope_error_criterion
+    assert result.is_spiral
