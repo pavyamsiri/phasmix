@@ -13,7 +13,7 @@ from phasmock.recipe import MockRecipe
 from rich import print as rich_print
 from scipy import ndimage
 
-from phasmix.fit.ttg_fourier import compute_ttg_coefficients, compute_ttg_coefficients_grid, detect_ttg_phase_spiral
+from phasmix.fit.ttg_fourier import compute_ttg_coeffs, compute_ttg_coeffs_grid, detect_ttg_phase_spiral
 
 if TYPE_CHECKING:
     from optype import numpy as onp
@@ -108,11 +108,11 @@ def main() -> None:
 
     use_particles: bool = True
     if not use_particles:
-        coeffs = compute_ttg_coefficients_grid(ps_map, r_mesh, phi_mesh, r_extent=(0.0, rmax), max_mode=6, num_bins=num_r_bins)
+        coeffs = compute_ttg_coeffs_grid(ps_map, r_mesh, phi_mesh, r_extent=(0.0, rmax), max_mode=6, num_bins=num_r_bins)
     else:
         r_samples = np.hypot(z_samples, vz_samples / scale_factor)
         thetaz_samples = np.arctan2(vz_samples / scale_factor, z_samples)
-        coeffs = compute_ttg_coefficients(r_samples, thetaz_samples, r_edges=np.linspace(0, rmax, num_r_bins + 1), max_mode=6)
+        coeffs = compute_ttg_coeffs(r_samples, thetaz_samples, r_edges=np.linspace(0, rmax, num_r_bins + 1), max_mode=6)
 
     r_centres = 0.5 * (coeffs.r_edges[:-1] + coeffs.r_edges[1:])
     res = detect_ttg_phase_spiral(coeffs)

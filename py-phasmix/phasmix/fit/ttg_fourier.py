@@ -15,16 +15,16 @@ if TYPE_CHECKING:
     from optype import numpy as onp
 
 __all__: Final[list[str]] = [
-    "TTGCoeffs",
-    "TTGResult",
-    "compute_ttg_coefficients",
-    "compute_ttg_coefficients_grid",
+    "TtgCoeffs",
+    "TtgResult",
+    "compute_ttg_coeffs",
+    "compute_ttg_coeffs_grid",
     "detect_ttg_phase_spiral",
 ]
 
 
 @dataclass(frozen=True)
-class TTGCoeffs:
+class TtgCoeffs:
     """The coefficients fitted in the style of Tepper-Garcia et al. 2025's.
 
     Attributes
@@ -87,7 +87,7 @@ class TTGCoeffs:
 
 
 @dataclass(frozen=True)
-class TTGResult:
+class TtgResult:
     """The result of a Tepper-Garcia et al. 2025's phase spiral finder.
 
     Attributes
@@ -154,7 +154,7 @@ class TTGResult:
     monotonicity_criterion: bool
 
 
-def compute_ttg_coefficients(
+def compute_ttg_coeffs(
     r: onp.Array1D[np.float64],
     thetaz: onp.Array1D[np.float64],
     *,
@@ -162,7 +162,7 @@ def compute_ttg_coefficients(
     max_mode: int,
     orientation_centre: float = 0.5,
     orientation_width: float = 0.1,
-) -> TTGCoeffs:
+) -> TtgCoeffs:
     """Compute the Fourier coefficients in a series of rings in phase radius.
 
     Step 1 of the Tepper-Garcia et al. 2025 phase spiral finding method.
@@ -199,7 +199,7 @@ def compute_ttg_coefficients(
     )
 
 
-def compute_ttg_coefficients_grid(
+def compute_ttg_coeffs_grid(
     counts: onp.Array2D[np.float64],
     r_mesh: onp.Array2D[np.float64],
     phi_mesh: onp.Array2D[np.float64],
@@ -209,7 +209,7 @@ def compute_ttg_coefficients_grid(
     num_bins: int,
     orientation_centre: float = 0.5,
     orientation_width: float = 0.1,
-) -> TTGCoeffs:
+) -> TtgCoeffs:
     """Compute the Fourier coefficients in a series of rings in phase radius.
 
     Step 1 of the Tepper-Garcia et al. 2025 phase spiral finding method.
@@ -260,7 +260,7 @@ def _compute_annular_coefficients(
     max_mode: int,
     orientation_centre: float,
     orientation_width: float,
-) -> TTGCoeffs:
+) -> TtgCoeffs:
     """Process the radial bins and extra orientation annulus in one Fourier pass."""
     if not np.isfinite(orientation_width) or not 0 < orientation_width <= 1.0:
         msg = "`orientation_width` must be finite and in (0, 1] kpc"
@@ -276,7 +276,7 @@ def _compute_annular_coefficients(
     coefficients = fourier_custom(values=values_list, phis=phis_list, max_mode=max(max_mode, 1))
     orientation_coefficient = complex(coefficients[-1, 1])  # pyright: ignore[reportAny]
     orientation = float(np.angle(orientation_coefficient)) if abs(orientation_coefficient) > 0 else float("nan")
-    return TTGCoeffs(
+    return TtgCoeffs(
         coefficients=coefficients[:-1, : max_mode + 1],
         r_edges=r_edges,
         orientation=orientation,
@@ -284,8 +284,8 @@ def _compute_annular_coefficients(
 
 
 def detect_ttg_phase_spiral(
-    coeffs: TTGCoeffs, *, slope_threshold: float = 4.5, slope_err_threshold: float = 4.5, exclude: int = 2
-) -> TTGResult:
+    coeffs: TtgCoeffs, *, slope_threshold: float = 4.5, slope_err_threshold: float = 4.5, exclude: int = 2
+) -> TtgResult:
     """Post-process the Fourier coefficients and use four criteria to detect phase spirals.
 
     Parameters
@@ -338,7 +338,7 @@ def detect_ttg_phase_spiral(
     slope_error_criterion: bool = bool(res.stderr <= slope_err_threshold)
     winding = 1 if res.slope >= 0 else -1
 
-    return TTGResult(
+    return TtgResult(
         strength=strength,
         strength_m2=strength_m2,
         orientation=coeffs.orientation,
