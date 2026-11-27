@@ -91,6 +91,35 @@ class BfeCoeffs:
         density = self._evaluate(jz, thetaz)
         return self._number_counts(density, jz, thetaz) if number_counts else density
 
+    def reconstruct_cartesian(
+        self,
+        xz: onp.Array2D[np.float64],
+        yz: onp.Array2D[np.float64],
+        *,
+        number_counts: bool = False,
+    ) -> onp.Array2D[np.float64]:
+        """Reconstruct the basis function expansion of the coefficients.
+
+        Parameters
+        ----------
+        xz : Array2D[f64]
+            The Xz = sqrt(Jz)cos(thetaz) mesh.
+        yz : Array2D[f64]
+            The Yz = sqrt(Jz)sin(thetaz) mesh.
+        number_counts : bool
+            Set this to return the expansion in terms of number count.
+
+        Returns
+        -------
+        result : Array2D[f64]
+            The probability density if `number_counts` was not set otherwise the expected number counts.
+
+        """
+        _check_mesh_shapes(("xz", xz), ("yz", yz))
+        # Factor of 2.0 is the Jacobian between the (Xz, Yz) plane and the (Jz, thetaz) plane.
+        density = 2.0 * self._evaluate(np.square(xz) + np.square(yz), np.arctan2(yz, xz))
+        return self._number_counts(density, xz, yz) if number_counts else density
+
     def _evaluate(self, jz: onp.Array2D[np.float64], thetaz: onp.Array2D[np.float64]) -> onp.Array2D[np.float64]:
         """Evaluate the probability density on the given Jz and thetaz mesh.
 
@@ -122,28 +151,34 @@ class BfeCoeffs:
 
         return density
 
-    def reconstruct_cartesian(
-        self,
-        x: onp.Array2D[np.float64],
-        y: onp.Array2D[np.float64],
-        *,
-        number_counts: bool = False,
-    ) -> onp.Array2D[np.float64]:
-        """Evaluate the expansion per dx dy for x=sqrt(J) cos(theta), y=sqrt(J) sin(theta).
-
-        Count estimates infer bin areas from the Cartesian centre mesh
-        using the same midpoint rule as reconstruct.
-        """
-        _check_mesh_shapes(("x", x), ("y", y))
-        density = 2 * self._evaluate(x**2 + y**2, np.arctan2(y, x))
-        return self._number_counts(density, x, y) if number_counts else density
-
     def _number_counts(
         self,
         density: onp.Array2D[np.float64],
         first: onp.Array2D[np.float64],
         second: onp.Array2D[np.float64],
     ) -> onp.Array2D[np.float64]:
+        """Transform the given density to expected number counts.
+
+        Parameters
+        ----------
+        density : Array2D[f64]
+            The density evaluated at the mesh centres.
+        first : Array2D[f64]
+            The first coordinate mesh.
+        second : Array2D[f64]
+            The second coordinate mesh.
+
+        Returns
+        -------
+        counts : Array2D[f64]
+            The expected number counts.
+
+        Raises
+        ------
+        ValueError
+            This method fails if `particle_counts` is not set.
+
+        """
         if self.particle_count is None:
             msg = "Particle count is required for number counts"
             raise ValueError(msg)
@@ -294,7 +329,26 @@ def compute_bfe_coeffs(
     return BfeCoeffs(coefficients=anm, alpha=alpha, action_scale=scale, particle_count=jz.size)
 
 
-def _radial_basis(n: int, alpha: Literal[0, 1], x: onp.ArrayND[np.float64], scale: float) -> onp.ArrayND[np.float64]:
+def _radial_basis(n: int, alpha: Literal[0, 1], x: onp.Array1D[np.float64], scale: float) -> onp.Array1D[np.float64]:
+    """Evaluate the radial basis function with the given parameters and arguments.
+
+    Parameters
+    ----------
+    n : int
+        The degree of the Laguerre polynomial.
+    alpha : 0, 1
+        The alpha parameter of the Laguerre polynomial.
+    x : Array1D[f64]
+        The scaled actions `Jz/a`.
+    scale : float
+        The action scale `a`.
+
+    Returns
+    -------
+    Array1D[f64]
+        The radial basis function evaluated at the given scaled actions.
+
+    """
     prefactor: float = np.sqrt(2 / scale) if alpha == 0 else 1 / (scale * np.sqrt(n + 1))  # pyright: ignore[reportAny]
     return prefactor * np.exp(-x) * special.eval_genlaguerre(n, alpha, 2 * x)
 
