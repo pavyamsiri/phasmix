@@ -183,7 +183,7 @@ class BfeCoeffs:
             msg = "Particle count is required for number counts"
             raise ValueError(msg)
 
-        area = _mesh_bin_areas(first, second)
+        area = _mesh_bin_area(first, second)
 
         return density * area * self.particle_count
 
@@ -246,8 +246,12 @@ def _check_action_angle_mesh(jz: onp.Array2D[np.float64], thetaz: onp.Array2D[np
         raise ValueError(msg)
 
 
-# TODO: This function is not correct for non-uniform grids
-def _mesh_bin_areas(first: onp.Array2D[np.float64], second: onp.Array2D[np.float64]) -> float:
+def _mesh_bin_area(
+    first: onp.Array2D[np.float64],
+    second: onp.Array2D[np.float64],
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> float:
     """Calculate the area for a 2D bin given their mesh centres.
 
     Parameters
@@ -256,6 +260,10 @@ def _mesh_bin_areas(first: onp.Array2D[np.float64], second: onp.Array2D[np.float
         The first coordinate's mesh.
     second : Array2D[f64]
         The second coordinate's mesh.
+    rtol : float
+        The relative tolerance for the spacing to count as uniform.
+    atol : float
+        The absolute tolerance for the spacing to count as uniform.
 
     Returns
     -------
@@ -263,18 +271,84 @@ def _mesh_bin_areas(first: onp.Array2D[np.float64], second: onp.Array2D[np.float
         The area of a bin.
 
     """
-    if min(first.shape) < 2:
-        msg = "Number counts require at least two bin centres along each axis"
+    if first.ndim != 2 or second.ndim != 2:
+        msg = "Coordinate meshes must be two-dimensional"
         raise ValueError(msg)
 
-    first_is_valid = not (np.all(np.isclose(np.diff(first, axis=0), 0.0)) and np.all(np.isclose(np.diff(first, axis=1), 0.0)))
-    second_is_valid = not (np.all(np.isclose(np.diff(second, axis=0), 0.0)) and np.all(np.isclose(np.diff(second, axis=1), 0.0)))
-    if first_is_valid and second_is_valid:
-        first_width: float = max(abs(first[0, 0] - first[0, 1]), abs(first[0, 0] - first[1, 0]))  # pyright: ignore[reportAny]
-        second_width: float = max(abs(second[0, 0] - second[0, 1]), abs(second[0, 0] - second[1, 0]))  # pyright: ignore[reportAny]
-        return first_width * second_width
+    if first.shape != second.shape:
+        msg = "Coordinate meshes must have identical shapes"
+        raise ValueError(msg)
 
-    msg = "Number counts require a rectilinear bin-centre mesh"
+    if min(first.shape) < 2:
+        msg = "At least two bin centres per axis are required"
+        raise ValueError(msg)
+
+    first_width, first_axis = _mesh_spacing(first, rtol=rtol, atol=atol)
+    second_width, second_axis = _mesh_spacing(second, rtol=rtol, atol=atol)
+
+    if first_axis == second_axis:
+        msg = "Coordinate meshes must vary along different axes"
+        raise ValueError(msg)
+
+    return first_width * second_width
+
+
+def _mesh_spacing(
+    mesh: onp.Array2D[np.float64],
+    *,
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> tuple[float, int]:
+    """Calculate the spacing between mesh centres and it axis in which the mesh varies.
+
+    This function assumes the coordinate mesh is uniform and rectilinear i.e. the spacings
+    are the same and the mesh only varies in one axis.
+
+    Parameters
+    ----------
+    mesh : Array2D[f64]
+        The coordinate mesh.
+    rtol : float
+        The relative tolerance for the spacing to count as uniform.
+    atol : float
+        The absolute tolerance for the spacing to count as uniform.
+
+    Returns
+    -------
+    spacing : float
+        The uniform spacing.
+    axis : int
+        The axis in which the mesh varies.
+
+    """
+    if mesh.ndim != 2:
+        msg = "Coordinate mesh must be 2D."
+        raise ValueError(msg)
+
+    if not np.all(np.isfinite(mesh)):
+        msg = "Mesh coordinates must be finite"
+        raise ValueError(msg)
+
+    for axis in (0, 1):
+        spacing = np.diff(mesh, axis=axis)
+        orthogonal = np.diff(mesh, axis=1 - axis)
+
+        # Must be constant along the orthogonal axis.
+        if not np.allclose(orthogonal, 0.0, atol=atol):
+            continue
+
+        # Must be strictly monotonic.
+        if not (np.all(spacing > 0.0) or np.all(spacing < 0.0)):
+            continue
+
+        # Must be uniformly spaced.
+        width = float(np.mean(spacing))
+        if not np.allclose(spacing, width, rtol=rtol, atol=atol):
+            continue
+
+        return abs(width), axis
+
+    msg = "Expected a uniformly spaced rectilinear mesh"
     raise ValueError(msg)
 
 
