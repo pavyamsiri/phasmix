@@ -63,7 +63,7 @@ def _generate_mock() -> tuple[MockParticles, onp.Array1D[np.float64], onp.Array1
     x_edges = np.linspace(-2.0, 2.0, num_x_bins + 1)
     y_edges = np.linspace(-2.0, 2.0, num_y_bins + 1)
 
-    num_particles: int = 100_000
+    num_particles: int = 250_000
     log.info("Sampling %d particles...", num_particles)
     return (mock_model.mock_particles(num_particles, x_edges, y_edges), x_edges, y_edges)
 
@@ -77,30 +77,18 @@ def main() -> None:
     y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
 
     x_mesh, y_mesh = np.meshgrid(x_centres, y_centres)
-    bin_areas = np.diff(y_edges)[:, None] * np.diff(x_edges)[None, :]
 
     jz = np.square(np.hypot(particles.x, particles.y))
     thetaz = np.arctan2(particles.y, particles.x)
 
     orth_coeffs = compute_orthogonal_bfe_coefficients(jz, thetaz)
-    orth_reconstructed = orth_coeffs.reconstruct_cartesian(x_mesh, y_mesh) * jz.size * bin_areas
+    orth_reconstructed = orth_coeffs.reconstruct_cartesian(x_mesh, y_mesh, number_counts=True)
 
     tav_coeffs = compute_tavbfe_coefficients(jz, thetaz)
-    # Reuse the fitted scale: the evaluation grid must not set the radial scale.
-    action_scale = np.mean(jz)
-    grid_action = x_mesh**2 + y_mesh**2
-    grid_angle = np.arctan2(y_mesh, x_mesh)
-    scaled_action = grid_action / action_scale
-    tav_reconstructed = np.zeros_like(x_mesh)
-    for n, modes in enumerate(tav_coeffs.coefficients):
-        radial = np.exp(-scaled_action) * special.eval_genlaguerre(n, 1, 2 * scaled_action) / (action_scale * np.sqrt(n + 1))
-        angular = np.full_like(x_mesh, modes[0].real / np.sqrt(np.pi))
-        for m in range(1, len(modes)):
-            angular += np.sqrt(2 / np.pi) * np.real(modes[m] * np.exp(1j * m * grid_angle))
-        tav_reconstructed += radial * angular
-    # Tavangar coefficients already contain particle sums. The Jacobian is 2
-    # for J = X**2 + Y**2; multiply by bin area to compare particle counts.
-    tav_reconstructed *= 2 * bin_areas
+    tav_reconstructed = tav_coeffs.reconstruct_cartesian(x_mesh, y_mesh, number_counts=True)
+
+    print(f"Tavangar basis (alpha = 1): C1/C0 = {tav_coeffs.strength(1) / tav_coeffs.strength(0)}")
+    print(f"Orthogonal basis (alpha = 0): C1/C0 = {orth_coeffs.strength(1) / orth_coeffs.strength(0)}")
 
     norm = mplcolors.Normalize(
         vmin=min(density.min(), orth_reconstructed.min()),
