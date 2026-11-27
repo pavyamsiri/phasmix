@@ -1,4 +1,4 @@
-"""Shared tests for the BFE fitters."""
+"""Property-based tests for Tavangar et al. 2026's BFE method."""
 
 from __future__ import annotations
 

@@ -61,6 +61,7 @@ dev = [
     "maturin>=1.13.3",
     "phasmix-mock",
     "pytest>=9.0.2",
+    "pytest-regressions>=2.11.0",
 ]
 
 [tool.maturin]
