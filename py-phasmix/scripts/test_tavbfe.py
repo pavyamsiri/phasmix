@@ -46,7 +46,7 @@ def _generate_mock() -> tuple[MockParticles, onp.Array1D[np.float64], onp.Array1
         alpha=0.5,
         b=0.2,
         c=0.0,
-        theta0=-np.pi / 2,
+        theta0=np.pi / 2,
         scale_factor=1.0,
         rho=0.09,
         winding=-1,
@@ -95,10 +95,11 @@ def main() -> None:
         vmax=max(density.max(), orth_reconstructed.max()),
     )
     fig = plt.figure(figsize=(5, 10))
-    gs = fig.add_gridspec(nrows=3, ncols=2, width_ratios=(1.0, 0.1))
+    gs = fig.add_gridspec(nrows=4, ncols=2, width_ratios=(1.0, 0.1))
     observed_axes = fig.add_subplot(gs[0, 0])
     tav_axes = fig.add_subplot(gs[1, 0])
     orth_axes = fig.add_subplot(gs[2, 0])
+    phase_axes = fig.add_subplot(gs[3, 0])
     cbar_axes = fig.add_subplot(gs[:, 1])
 
     for ax in (observed_axes, tav_axes, orth_axes):
@@ -119,6 +120,14 @@ def main() -> None:
     orth_axes.set_title(r"Reconstruction (Modified)")
 
     fig.colorbar(observed, cax=cbar_axes, label="Number density")
+
+    phase_axes.scatter(
+        np.arange(orth_coeffs.coefficients.shape[0]), np.rad2deg(np.unwrap(np.angle(orth_coeffs.coefficients[:, 1])))
+    )
+    phase_axes.set_ylim(-360, 360)
+    orientation = np.rad2deg(np.angle(np.sum(orth_coeffs.coefficients[:, 1])))
+    phase_axes.axhline(orientation, ls="--", color="tab:orange")
+    print(orientation)
 
     fig.tight_layout()
     fig.savefig("out.png")

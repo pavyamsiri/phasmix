@@ -59,7 +59,9 @@ class BfeCoeffs:
         """
         if m not in range(self.coefficients.shape[1]):
             return float("nan")
-        return float(np.sqrt(np.sum(np.square(np.abs(self.coefficients[:, m])))))  # pyright: ignore[reportAny]
+        prefactor = np.sqrt(2) if m > 0 else 1.0
+        squares = np.square(np.abs(self.coefficients[:, m]))
+        return float(prefactor * np.sqrt(np.sum(squares)))  # pyright: ignore[reportAny]
 
     def reconstruct(
         self,
